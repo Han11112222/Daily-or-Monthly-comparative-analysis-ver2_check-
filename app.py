@@ -629,15 +629,15 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     )
 
     # ─────────────────────────────────────────────────────────────
-    # [NEW] 보정 기능 (Calibration) Logic - 상단 우측
+    # [NEW] 보정 기능 (Calibration) Logic - 상단 우측 배치
     # ─────────────────────────────────────────────────────────────
     view = df_result.copy()
     view["보정_예상공급량(MJ)" ] = view["예상공급량(MJ)"] # 초기값은 원본과 동일
     
     st.divider()
     
-    # [수정] 우측 상단 배치를 위해 컬럼 나누기
-    col_main, col_calib = st.columns([1, 1]) 
+    # 1번째 사진 레이아웃을 해치지 않으면서 우측 상단에 배치하기 위해 컬럼 분할
+    col_dummy, col_calib = st.columns([1, 1]) 
     
     with col_calib:
         # 우측 상단에 Expander 배치
@@ -649,10 +649,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 min_date = view["일자"].min().date()
                 max_date = view["일자"].max().date()
                 
-                # 1. 이상구간 (Outlier) 설정
                 date_range_out = st.date_input("1. 이상구간 (보정 대상)", value=(min_date, min_date), min_value=min_date, max_value=max_date)
-                
-                # 2. 보정구간 (Redistribution) 설정
                 date_range_dist = st.date_input("2. 보정구간 (잉여값 배분)", value=(min_date, max_date), min_value=min_date, max_value=max_date)
 
                 if len(date_range_out) == 2 and len(date_range_dist) == 2:
@@ -673,15 +670,11 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                                 view.loc[mask_out, "예상공급량(MJ)"]
                             )
                         )
-                        
-                        # 발생한 차이
                         diff_mj = (view.loc[mask_out, "예상공급량(MJ)"] - view.loc[mask_out, "보정_예상공급량(MJ)"]).sum()
                     
                     # --- Step 2: 보정구간 Redistribution ---
                     mask_dist = (view["일자"].dt.date >= start_dist) & (view["일자"].dt.date <= end_dist)
-                    
                     sum_ratios = view.loc[mask_dist, "일별비율"].sum()
-                    
                     if mask_dist.any() and sum_ratios > 0:
                         view.loc[mask_dist, "보정_예상공급량(MJ)"] += diff_mj * (view.loc[mask_dist, "일별비율"] / sum_ratios)
                         
@@ -742,29 +735,36 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
     fig = go.Figure()
     
-    # 1. 배경 그래프 (보정 전) - use_calibration True일 때만 "투명한 회색"으로 배경에 깔기
+    # 1. 기존(AS-IS): 보정이 활성화되어도 원래 그래프는 '배경'으로 깔아줌
     if use_calibration:
+        # [보정 모드] 배경: 원래 계획 (기존 색상 그대로)
+        w1_o = view[view["구분"] == "평일1(월·금)"]
+        w2_o = view[view["구분"] == "평일2(화·수·목)"]
+        we_o = view[view["구분"] == "주말/공휴일"]
+        
+        # 원래 색상 유지
+        fig.add_bar(x=w1_o["일"], y=w1_o["예상공급량(GJ)"], name="기존(평일1)", marker_color="#636EFA", opacity=0.3)
+        fig.add_bar(x=w2_o["일"], y=w2_o["예상공급량(GJ)"], name="기존(평일2)", marker_color="#EF553B", opacity=0.3)
+        fig.add_bar(x=we_o["일"], y=we_o["예상공급량(GJ)"], name="기존(주말)", marker_color="#00CC96", opacity=0.3)
+        
+        # [보정 모드] 전경: 달라진 값 (TO-BE) -> 진한 회색 투명하게
+        # 보정된 값이 기존 값과 다른 부분만 강조하거나 전체를 덮어씀
         fig.add_bar(
             x=view["일"], 
-            y=view["예상공급량(GJ)"], 
-            name="보정 전 (Original)", 
-            marker_color="lightgray", 
-            opacity=0.3  # 요청하신 투명도 있는 회색
+            y=view["보정_예상공급량(GJ)"], 
+            name="보정 후 (Calibrated)", 
+            marker_color="rgba(80, 80, 80, 0.6)" # 진한 회색, 투명도 있음
         )
         
-    # 2. 메인 그래프 (보정 후 or 원래) - 기존 색상(파랑/빨강/초록) 유지
-    # 보정이 켜져있으면 '보정_예상공급량'을 그리고, 꺼져있으면 '예상공급량'을 그립니다.
-    target_col = "보정_예상공급량(GJ)" if use_calibration else "예상공급량(GJ)"
-    
-    w1 = view[view["구분"] == "평일1(월·금)"]
-    w2 = view[view["구분"] == "평일2(화·수·목)"]
-    we = view[view["구분"] == "주말/공휴일"]
+    else:
+        # [일반 모드] 기존 방식 그대로 (파랑/빨강/초록)
+        w1_df = view[view["구분"] == "평일1(월·금)"].copy()
+        w2_df = view[view["구분"] == "평일2(화·수·목)"].copy()
+        wend_df = view[view["구분"] == "주말/공휴일"].copy()
 
-    # 색상은 기존 코드(1번째 사진)에서 쓰던 방식을 그대로 사용 (Plotly Default Cycle 또는 명시적 지정)
-    # 여기서는 확실하게 3색 분리
-    fig.add_bar(x=w1["일"], y=w1[target_col], name="평일1(월·금)", marker_color="#636EFA")
-    fig.add_bar(x=w2["일"], y=w2[target_col], name="평일2(화·수·목)", marker_color="#EF553B")
-    fig.add_bar(x=we["일"], y=we[target_col], name="주말/공휴일", marker_color="#00CC96")
+        fig.add_bar(x=w1_df["일"], y=w1_df["예상공급량(GJ)"], name="평일1(월·금)", marker_color="#636EFA")
+        fig.add_bar(x=w2_df["일"], y=w2_df["예상공급량(GJ)"], name="평일2(화·수·목)", marker_color="#EF553B")
+        fig.add_bar(x=wend_df["일"], y=wend_df["예상공급량(GJ)"], name="주말/공휴일", marker_color="#00CC96")
     
     # 3. 비율 라인
     fig.add_trace(
@@ -779,7 +779,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
     fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100, 100, 100, 0.1)', name='권장 범위(±10%)', hoverinfo='skip'))
 
-    # 5. Outlier Marker
+    # 5. Outlier Marker (빨간색 X 유지)
     outliers = view[view["is_outlier"]]
     if not outliers.empty:
         fig.add_trace(go.Scatter(x=outliers["일"], y=outliers["예상공급량(GJ)"], mode='markers', marker=dict(color='red', size=10, symbol='x'), name='Outlier'))
@@ -789,7 +789,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         xaxis_title="일",
         yaxis=dict(title="예상 공급량 (GJ)"),
         yaxis2=dict(title="일별비율", overlaying="y", side="right"),
-        barmode="overlay" if use_calibration else "group", # 겹쳐보기
+        barmode="overlay" if use_calibration else "group", # 보정 시 겹쳐보기
         margin=dict(l=20, r=20, t=60, b=40),
         legend=dict(orientation="h", y=1.1)
     )
