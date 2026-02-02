@@ -1,0 +1,1 @@
+# Daily-or-Monthly-comparative-analysis-ver2_check-
