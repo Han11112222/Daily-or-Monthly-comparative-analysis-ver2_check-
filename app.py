@@ -13,7 +13,7 @@ from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 # 1. 기본 설정 및 상수
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="도시가스 공급량: 일별계획 예측 (Final)",
+    page_title="도시가스 공급량: 일별계획 예측",
     layout="wide",
 )
 
@@ -29,7 +29,7 @@ def mj_to_m3(x):
     except: return np.nan
 
 # ─────────────────────────────────────────────
-# 2. 데이터 로딩 (에러 방지 강화)
+# 2. 데이터 로딩 (전체 기능 복구)
 # ─────────────────────────────────────────────
 @st.cache_data
 def load_daily_data():
@@ -84,14 +84,14 @@ def load_effective_calendar() -> pd.DataFrame | None:
 
 @st.cache_data
 def load_corr_data() -> pd.DataFrame | None:
-    # [복구] 상관도 분석용 데이터 로드
+    # [복구] 상관도 분석용 데이터
     excel_path = Path(__file__).parent / "상관도분석.xlsx"
     if not excel_path.exists(): return None
     try: return pd.read_excel(excel_path)
     except: return None
 
 # ─────────────────────────────────────────────
-# 3. 유틸 함수
+# 3. 유틸 함수 (전체 복구)
 # ─────────────────────────────────────────────
 def _find_plan_col(df_plan: pd.DataFrame) -> str:
     candidates = ["계획(사업계획제출_MJ)", "계획(사업계획제출)", "계획_MJ", "계획"]
@@ -148,7 +148,7 @@ def _format_excel_sheet(ws, freeze="A2", center=True, width_map=None):
     if width_map:
         for col_letter, w in width_map.items():
             ws.column_dimensions[col_letter].width = w
-            
+
 def _add_cumulative_status_sheet(wb, annual_year):
     sheet_name = "누적계획현황"
     if sheet_name in wb.sheetnames: return
@@ -186,11 +186,6 @@ def _add_cumulative_status_sheet(wb, annual_year):
     ws["D6"] = f'=SUMIFS(연간!$P:$P,연간!$A:$A,YEAR({d}))'
     ws["E6"] = f'=SUMIFS(연간!$P:$P,연간!$D:$D,">="&DATE(YEAR({d}),1,1),연간!$D:$D,"<="&{d})'
     ws["F6"] = '=IFERROR(IF(B6=0,"",C6/B6),"")'
-
-    for r in range(4, 7):
-        for c in range(2, 6):
-            cell = ws.cell(row=r, column=c); cell.number_format = "#,##0"; cell.border = border
-        pct = ws.cell(row=r, column=6); pct.number_format = "0.00%"; pct.border = border
     ws.freeze_panes = "A4"
 
 def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
@@ -261,7 +256,6 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     
     df_pool = df_daily[(df_daily["연도"].isin(candidate_years)) & (df_daily["월"] == target_month)].dropna(subset=["공급량(MJ)"])
     used_years = sorted(df_pool["연도"].unique())
-    
     if not used_years: return None, None, [], pd.DataFrame()
 
     df_recent = df_pool.copy().sort_values(["연도", "일"])
@@ -436,7 +430,7 @@ def tab_daily_plan(df_daily):
             
             st.caption(f"변동량: {mj_to_gj(diff_mj):,.0f} GJ")
 
-    # ─────────────── [그래프] 색상: 파/빨 (녹색 삭제) ───────────────
+    # ─────────────── [그래프] 색상: 파/파/빨 (녹색 제거) ───────────────
     view["예상공급량(GJ)"] = view["예상공급량(MJ)"].apply(mj_to_gj)
     view["보정_예상공급량(GJ)"] = view["보정_예상공급량(MJ)"].apply(mj_to_gj)
     view["Bound_Upper(GJ)"] = view["Bound_Upper"].apply(mj_to_gj)
@@ -451,7 +445,7 @@ def tab_daily_plan(df_daily):
     # ★ [중요] 기존 색상 고정 (녹색 제거): 평일1=진파랑, 평일2=연파랑, 주말=빨강
     fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월·금)", marker_color="#1F77B4"))
     fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화·수·목)", marker_color="#636EFA"))
-    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#EF553B")) # 녹색 삭제 -> 빨강
+    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#EF553B")) # 녹색 제거 -> 빨강
 
     # 보정 그래프 (회색 덮어쓰기)
     if use_calib:
@@ -485,10 +479,9 @@ def tab_daily_plan(df_daily):
 # ─────────────────────────────────────────────
 def tab_daily_monthly_compare(df, df_temp_all):
     st.subheader("📊 상관도 분석 및 비교")
-    # (여기 상관도 분석 등 기존 코드 내용이 들어감)
     df_corr = load_corr_data()
     if df_corr is not None:
-         # 상관도 히트맵 표시 (간략)
+         # 상관도 히트맵 (간략 복구)
          num_df = df_corr.select_dtypes(include=["number"])
          st.dataframe(num_df.corr())
     _render_daily_temp_heatmap(df_temp_all)
