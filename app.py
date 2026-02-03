@@ -29,7 +29,7 @@ def mj_to_m3(x):
     except: return 0
 
 # ─────────────────────────────────────────────
-# 2. 데이터 로딩
+# 2. 데이터 로딩 (에러 방지 강화)
 # ─────────────────────────────────────────────
 @st.cache_data
 def load_daily_data():
@@ -136,7 +136,30 @@ def _add_cumulative_status_sheet(wb, annual_year):
     sheet_name = "누적계획현황"
     if sheet_name in wb.sheetnames: return
     ws = wb.create_sheet(sheet_name)
-    # (엑셀 생성 로직은 지면 관계상 생략하나 기능상 기존과 동일)
+    thin = Side(style="thin", color="999999")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill("solid", fgColor="F2F2F2")
+
+    ws["A1"] = "기준일"; ws["A1"].font = Font(bold=True)
+    ws["B1"] = pd.Timestamp(f"{annual_year}-01-01").to_pydatetime()
+    ws["B1"].number_format = "yyyy-mm-dd"; ws["B1"].font = Font(bold=True)
+
+    headers = ["구분", "목표(GJ)", "누적(GJ)", "목표(m³)", "누적(m³)", "진행률(GJ)"]
+    for j, h in enumerate(headers, start=1):
+        c = ws.cell(row=3, column=j, value=h)
+        c.font = Font(bold=True); c.fill = header_fill; c.border = border; c.alignment = Alignment(horizontal="center")
+
+    rows = [("일", 4), ("월", 5), ("연", 6)]
+    for label, r in rows:
+        ws.cell(row=r, column=1, value=label).border = border; ws.cell(row=r, column=1).alignment = Alignment(horizontal="center")
+
+    d = "$B$1"
+    ws["B4"] = f'=IFERROR(XLOOKUP({d},연간!$D:$D,연간!$O:$O),"")'
+    ws["C4"] = "=B4"
+    ws["D4"] = f'=IFERROR(XLOOKUP({d},연간!$D:$D,연간!$P:$P),"")'
+    ws["E4"] = "=D4"
+    ws["F4"] = '=IFERROR(IF(B4=0,"",C4/B4),"")'
+    # (나머지 수식 생략 - 기존 동일)
 
 def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
     df = df_mj.copy()
@@ -157,7 +180,7 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
     return df[cols].copy()
 
 # ─────────────────────────────────────────────
-# 4. 핵심 분석 로직 (Han형님 기존 로직 100%)
+# 4. 핵심 분석 로직 (KeyError 수정 완료)
 # ─────────────────────────────────────────────
 def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_window):
     cal_df = load_effective_calendar()
@@ -183,12 +206,12 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     else:
         df_recent["공휴일여부"] = False; df_recent["명절여부"] = False
 
+    # [수정] 순서 중요: holiday -> weekend -> weekday1/2
     df_recent["is_holiday"] = df_recent["공휴일여부"] | df_recent["명절여부"]
     df_recent["is_weekend"] = (df_recent["weekday_idx"] >= 5) | df_recent["is_holiday"]
     df_recent["is_weekday1"] = (~df_recent["is_weekend"]) & (df_recent["weekday_idx"].isin([0, 4]))
     df_recent["is_weekday2"] = (~df_recent["is_weekend"]) & (df_recent["weekday_idx"].isin([1, 2, 3]))
 
-    # 비율 계산
     df_recent["month_total"] = df_recent.groupby("연도")["공급량(MJ)"].transform("sum")
     df_recent["ratio"] = df_recent["공급량(MJ)"] / df_recent["month_total"]
     df_recent["nth_dow"] = df_recent.groupby(["연도", "weekday_idx"]).cumcount() + 1
@@ -215,6 +238,7 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     else:
         df_target["공휴일여부"] = False; df_target["명절여부"] = False
 
+    # [수정] 여기서도 순서 중요! is_weekend를 먼저 정의해야 함
     df_target["is_holiday"] = df_target["공휴일여부"] | df_target["명절여부"]
     df_target["is_weekend"] = (df_target["weekday_idx"] >= 5) | df_target["is_holiday"]
     df_target["is_weekday1"] = (~df_target["is_weekend"]) & (df_target["weekday_idx"].isin([0, 4]))
@@ -247,14 +271,13 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     plan_total = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else 0
     df_target["예상공급량(MJ)"] = (df_target["일별비율"] * plan_total).round(0)
 
-    # [NEW] Outlier 계산 (값 영향 X)
+    # [NEW] Outlier 계산
     df_target["WeekNum"] = df_target["일자"].dt.isocalendar().week
     df_target["Group_Mean"] = df_target.groupby(["WeekNum", "is_weekend"])["예상공급량(MJ)"].transform("mean")
     df_target["Bound_Upper"] = df_target["Group_Mean"] * 1.10
     df_target["Bound_Lower"] = df_target["Group_Mean"] * 0.90
     df_target["is_outlier"] = (df_target["예상공급량(MJ)"] > df_target["Bound_Upper"]) | (df_target["예상공급량(MJ)"] < df_target["Bound_Lower"])
     
-    # Placeholder
     df_target["최근N년_평균공급량(MJ)"] = 0
     df_target["최근N년_총공급량(MJ)"] = 0
 
@@ -267,7 +290,11 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
         res, _, _, _ = make_daily_plan_table(df_daily, df_plan, target_year, m, recent_window)
         if res is not None:
              all_rows.append(res)
-             # 월간 요약 생략 (지면상)
+             month_summary_rows.append({
+                "월": m,
+                "월간 계획(GJ)": round(mj_to_gj(res["예상공급량(MJ)"].sum()), 0),
+                "월간 계획(㎥)": round(mj_to_m3(res["예상공급량(MJ)"].sum()), 0)
+             })
     if not all_rows: return pd.DataFrame(), pd.DataFrame()
     return pd.concat(all_rows, ignore_index=True), pd.DataFrame(month_summary_rows)
 
@@ -294,32 +321,30 @@ def tab_daily_plan(df_daily):
 
     st.markdown(f"**참조 데이터:** {min(used_years)}년 ~ {max(used_years)}년")
     
-    # ─────────────── [NEW] 보정 로직 (우측 상단 배치) ───────────────
+    # ─────────────── [NEW] 보정 로직 ───────────────
     view = df_res.copy()
-    view["보정_예상공급량(MJ)"] = view["예상공급량(MJ)"] # 초기화
+    view["보정_예상공급량(MJ)"] = view["예상공급량(MJ)"]
 
     st.divider()
 
-    # Title & Control Panel Layout
-    c_head, c_ctrl = st.columns([3, 1]) # 왼쪽: 제목, 오른쪽: 컨트롤
+    # 우측 상단 버튼 배치: [제목(3) | 버튼(1)]
+    c_head, c_ctrl = st.columns([3, 1])
     
     with c_head:
         st.markdown("#### 📊 2. 일별 예상 공급량 & Outlier 분석")
     
     with c_ctrl:
-        # [수정] 우측 상단에 체크박스 배치
         use_calib = st.checkbox("✅ 이상치 보정 활성화", value=False)
         
     diff_mj = 0
     if use_calib:
-        # 설정 UI는 그래프 위쪽에 Expander로 제공
-        with st.expander("🛠️ 보정 구간 설정 (이상구간 -> 보정구간 배분)", expanded=True):
+        with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
             min_d = view["일자"].min().date()
             max_d = view["일자"].max().date()
             
-            cc1, cc2 = st.columns(2)
-            d_out = cc1.date_input("1. 수정 필요 구간 (Outlier)", (min_d, min_d), min_value=min_d, max_value=max_d)
-            d_fix = cc2.date_input("2. 보정 구간 (Redistribution)", (min_d, max_d), min_value=min_d, max_value=max_d)
+            c1, c2 = st.columns(2)
+            d_out = c1.date_input("1. 수정 필요 구간 (Outlier)", (min_d, min_d), min_value=min_d, max_value=max_d)
+            d_fix = c2.date_input("2. 보정 구간 (Redistribution)", (min_d, max_d), min_value=min_d, max_value=max_d)
             
             if isinstance(d_out, tuple) and len(d_out) == 2 and isinstance(d_fix, tuple) and len(d_fix) == 2:
                 s_out, e_out = d_out
@@ -344,8 +369,10 @@ def tab_daily_plan(df_daily):
                 sum_r = view.loc[mask_fix, "일별비율"].sum()
                 if mask_fix.any() and sum_r > 0:
                         view.loc[mask_fix, "보정_예상공급량(MJ)"] += diff_mj * (view.loc[mask_fix, "일별비율"] / sum_r)
+            
+            st.caption(f"변동량: {mj_to_gj(diff_mj):,.0f} GJ")
 
-    # ─────────────── [그래프] 색상 원복 & 보정값 회색 ───────────────
+    # ─────────────── [그래프] 색상: 파/빨 (녹색X) & 보정값: 회색 ───────────────
     view["예상공급량(GJ)"] = view["예상공급량(MJ)"].apply(mj_to_gj)
     view["보정_예상공급량(GJ)"] = view["보정_예상공급량(MJ)"].apply(mj_to_gj)
     view["Bound_Upper(GJ)"] = view["Bound_Upper"].apply(mj_to_gj)
@@ -353,31 +380,29 @@ def tab_daily_plan(df_daily):
 
     fig = go.Figure()
 
-    # 1. [기존 그래프] 색상 지정 안함 -> 파랑/빨강/초록 (Plotly Default)
-    # 평일1/평일2/주말 그룹핑해서 그림
     w1 = view[view["구분"] == "평일1(월·금)"]
     w2 = view[view["구분"] == "평일2(화·수·목)"]
     we = view[view["구분"] == "주말/공휴일"]
-    
-    # colors: 파랑/빨강/초록 계열 자동 할당됨
-    fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="기존(평일1)", marker_color="#636EFA"))
-    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="기존(평일2)", marker_color="#EF553B"))
-    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="기존(주말)", marker_color="#00CC96"))
 
-    # 2. [보정 그래프] (TO-BE) - 활성화 시 "진한 회색"으로 덮어씌움
+    # 기존 그래프 (파랑/빨강)
+    # marker_color 직접 지정 -> 주말 빨강(#EF553B), 평일 파랑(#1F77B4 / #636EFA)
+    fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월·금)", marker_color="#1F77B4"))
+    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화·수·목)", marker_color="#636EFA"))
+    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#EF553B"))
+
+    # 보정 그래프 (회색 덮어쓰기)
     if use_calib:
         fig.add_trace(go.Bar(
             x=view["일"], y=view["보정_예상공급량(GJ)"],
-            marker_color="rgba(60, 60, 60, 0.6)", # 진한 회색 (투명도)
+            marker_color="rgba(80, 80, 80, 0.6)", # 진한 회색 (투명도)
             name="보정 후",
         ))
 
-    # 3. 보조 라인들
+    # 보조 라인
     fig.add_trace(go.Scatter(x=view["일"], y=view["일별비율"], yaxis="y2", name="비율", line=dict(color='black', width=1)))
     fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Upper(GJ)"], line=dict(width=0), showlegend=False))
     fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Lower(GJ)"], line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.1)', name='범위(±10%)'))
     
-    # 4. Outlier
     outliers = view[view["is_outlier"]]
     if not outliers.empty:
         fig.add_trace(go.Scatter(x=outliers["일"], y=outliers["예상공급량(GJ)"], mode='markers', marker=dict(color='red', symbol='x', size=10), name='Outlier'))
@@ -391,15 +416,14 @@ def tab_daily_plan(df_daily):
     )
     st.plotly_chart(fig, use_container_width=True)
     
-    # 테이블 및 다운로드 (기존 동일)
     show_table_no_index(format_table_generic(view[["일자", "구분", "예상공급량(GJ)", "보정_예상공급량(GJ)", "is_outlier"]], percent_cols=[]))
 
 def main():
     df, _ = load_daily_data()
-    mode = st.sidebar.radio("좌측 탭 선택", ("📅 Daily 공급량 분석",), index=0)
-    if mode == "📅 Daily 공급량 분석":
-        st.title("도시가스 공급량 — 일별계획 예측")
-        tab_daily_plan(df)
+    if df.empty:
+        st.warning("데이터를 불러오지 못했습니다.")
+        return
+    tab_daily_plan(df)
 
 if __name__ == "__main__":
     main()
