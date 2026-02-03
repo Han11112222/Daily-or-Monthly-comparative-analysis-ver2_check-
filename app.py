@@ -40,43 +40,63 @@ st.set_page_config(
 
 
 # ─────────────────────────────────────────────
-# 데이터 불러오기 (기존 유지)
+# 데이터 불러오기 (에러 방지 로직 강화)
 # ─────────────────────────────────────────────
 @st.cache_data
 def load_daily_data():
     excel_path = Path(__file__).parent / "공급량(일일실적).xlsx"
+    
+    # 필수 컬럼 정의 (파일이 없어도 껍데기는 만들어둠)
+    required_cols = ["일자", "공급량(MJ)", "공급량(M3)", "평균기온(℃)"]
+    
     if not excel_path.exists():
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(columns=required_cols), pd.DataFrame(columns=required_cols)
 
-    df_raw = pd.read_excel(excel_path)
+    try:
+        df_raw = pd.read_excel(excel_path)
+        
+        # 컬럼이 없는 경우 NaN으로라도 생성
+        for c in required_cols:
+            if c not in df_raw.columns:
+                df_raw[c] = np.nan
 
-    cols_check = ["일자", "공급량(MJ)", "공급량(M3)", "평균기온(℃)"]
-    for c in cols_check:
-        if c not in df_raw.columns:
-            df_raw[c] = np.nan
+        df_raw = df_raw[required_cols].copy()
+        df_raw["일자"] = pd.to_datetime(df_raw["일자"])
 
-    df_raw = df_raw[cols_check].copy()
-    df_raw["일자"] = pd.to_datetime(df_raw["일자"])
+        df_raw["연도"] = df_raw["일자"].dt.year
+        df_raw["월"] = df_raw["일자"].dt.month
+        df_raw["일"] = df_raw["일자"].dt.day
 
-    df_raw["연도"] = df_raw["일자"].dt.year
-    df_raw["월"] = df_raw["일자"].dt.month
-    df_raw["일"] = df_raw["일자"].dt.day
-
-    df_temp_all = df_raw.dropna(subset=["평균기온(℃)"]).copy()
-    df_model = df_raw.dropna(subset=["공급량(MJ)"]).copy()
-    return df_model, df_temp_all
+        df_temp_all = df_raw.dropna(subset=["평균기온(℃)"]).copy()
+        df_model = df_raw.dropna(subset=["공급량(MJ)"]).copy()
+        return df_model, df_temp_all
+        
+    except Exception as e:
+        st.error(f"일일실적 데이터 로딩 중 오류 발생: {e}")
+        return pd.DataFrame(columns=required_cols), pd.DataFrame(columns=required_cols)
 
 
 @st.cache_data
 def load_monthly_plan() -> pd.DataFrame:
     excel_path = Path(__file__).parent / "공급량(계획_실적).xlsx"
+    # 필수 컬럼 정의
+    required_cols = ["연", "월", "계획(사업계획제출_MJ)"]
+    
     if not excel_path.exists():
-        return pd.DataFrame()
+        # 파일 없으면 빈 DF 반환하되, 컬럼은 살려둠 (KeyError 방지)
+        return pd.DataFrame(columns=required_cols)
         
-    df = pd.read_excel(excel_path, sheet_name="월별계획_실적")
-    df["연"] = df["연"].astype(int)
-    df["월"] = df["월"].astype(int)
-    return df
+    try:
+        df = pd.read_excel(excel_path, sheet_name="월별계획_실적")
+        # 연/월 변환 에러 방지
+        if "연" in df.columns:
+            df["연"] = pd.to_numeric(df["연"], errors='coerce').fillna(0).astype(int)
+        if "월" in df.columns:
+            df["월"] = pd.to_numeric(df["월"], errors='coerce').fillna(0).astype(int)
+        return df
+    except Exception as e:
+        st.error(f"월별계획 데이터 로딩 중 오류 발생: {e}")
+        return pd.DataFrame(columns=required_cols)
 
 
 @st.cache_data
@@ -85,20 +105,23 @@ def load_effective_calendar() -> pd.DataFrame | None:
     if not excel_path.exists():
         return None
 
-    df = pd.read_excel(excel_path)
-    if "날짜" not in df.columns:
+    try:
+        df = pd.read_excel(excel_path)
+        if "날짜" not in df.columns:
+            return None
+
+        df["일자"] = pd.to_datetime(df["날짜"].astype(str), format="%Y%m%d", errors="coerce")
+
+        for col in ["공휴일여부", "명절여부"]:
+            if col not in df.columns:
+                df[col] = False
+
+        df["공휴일여부"] = df["공휴일여부"].fillna(False).astype(bool)
+        df["명절여부"] = df["명절여부"].fillna(False).astype(bool)
+
+        return df[["일자", "공휴일여부", "명절여부"]].copy()
+    except:
         return None
-
-    df["일자"] = pd.to_datetime(df["날짜"].astype(str), format="%Y%m%d", errors="coerce")
-
-    for col in ["공휴일여부", "명절여부"]:
-        if col not in df.columns:
-            df[col] = False
-
-    df["공휴일여부"] = df["공휴일여부"].fillna(False).astype(bool)
-    df["명절여부"] = df["명절여부"].fillna(False).astype(bool)
-
-    return df[["일자", "공휴일여부", "명절여부"]].copy()
 
 
 # ─────────────────────────────────────────────
@@ -109,11 +132,14 @@ def _find_plan_col(df_plan: pd.DataFrame) -> str:
     for c in candidates:
         if c in df_plan.columns:
             return c
-    nums = [c for c in df_plan.columns if pd.api.types.is_numeric_dtype(df_plan[c])]
+    # 숫자 컬럼 중 하나 (Fallback)
+    nums = [c for c in df_plan.columns if pd.api.types.is_numeric_dtype(df_plan[c]) and c not in ["연", "월"]]
     return nums[0] if nums else "계획(사업계획제출_MJ)"
 
 
 def make_month_plan_horizontal(df_plan: pd.DataFrame, target_year: int, plan_col: str) -> pd.DataFrame:
+    if df_plan.empty: return pd.DataFrame() # 방어 코드
+
     df_year = df_plan[df_plan["연"] == target_year][["월", plan_col]].copy()
     base = pd.DataFrame({"월": list(range(1, 13))})
     df_year = base.merge(df_year, on="월", how="left")
@@ -480,7 +506,6 @@ def make_daily_plan_table(
 
 
 def _build_year_daily_plan(df_daily: pd.DataFrame, df_plan: pd.DataFrame, target_year: int, recent_window: int):
-    # (연간 다운로드용 함수 - 기존과 동일하되 Outlier 컬럼은 비워둠)
     cal_df = load_effective_calendar()
     plan_col = _find_plan_col(df_plan)
 
@@ -573,8 +598,11 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
 
     df_plan = load_monthly_plan()
-    plan_col = _find_plan_col(df_plan)
+    if df_plan.empty:
+        st.warning("계획 데이터를 불러오지 못했습니다. 파일(공급량(계획_실적).xlsx)을 확인해주세요.")
+        return
 
+    plan_col = _find_plan_col(df_plan)
     years_plan = sorted(df_plan["연"].unique())
     default_year_idx = years_plan.index(2026) if 2026 in years_plan else len(years_plan) - 1
 
@@ -629,7 +657,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     )
 
     # ─────────────────────────────────────────────────────────────
-    # [NEW] 보정 기능 (Calibration) Logic - 그래프 우측 상단
+    # [NEW] 보정 기능 (Calibration) Logic - 상단 우측 배치
     # ─────────────────────────────────────────────────────────────
     view = df_result.copy()
     view["보정_예상공급량(MJ)" ] = view["예상공급량(MJ)"] # 초기값
@@ -643,48 +671,50 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         st.markdown("#### 📊 2. 일별 예상 공급량 & Outlier 분석")
     
     with col_calib:
-        # Checkbox를 바로 노출 (Expander 없이)
+        # Checkbox를 바로 노출
         use_calibration = st.checkbox("✅ 이상치 보정 활성화", value=False)
         
         diff_mj = 0.0
         if use_calibration:
-            # 보정 상세 설정 (그래프 상단에 위치)
-            min_date = view["일자"].min().date()
-            max_date = view["일자"].max().date()
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                date_range_out = st.date_input("1. 이상구간 (보정)", value=(min_date, min_date), min_value=min_date, max_value=max_date)
-            with c2:
-                date_range_dist = st.date_input("2. 보정구간 (배분)", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+            with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
+                min_date = view["일자"].min().date()
+                max_date = view["일자"].max().date()
+                
+                c1, c2 = st.columns(2)
+                with c1:
+                    # 1. 이상구간 (Outlier) 설정
+                    date_range_out = st.date_input("1. 이상구간 (보정 대상)", value=(min_date, min_date), min_value=min_date, max_value=max_date)
+                with c2:
+                    # 2. 보정구간 (Redistribution) 설정
+                    date_range_dist = st.date_input("2. 보정구간 (잉여값 배분)", value=(min_date, max_date), min_value=min_date, max_value=max_date)
 
-            if len(date_range_out) == 2 and len(date_range_dist) == 2:
-                start_out, end_out = date_range_out
-                start_dist, end_dist = date_range_dist
-                
-                # --- Step 1: 이상구간 Clamp (상한/하한으로 맞춤) ---
-                mask_out = (view["일자"].dt.date >= start_out) & (view["일자"].dt.date <= end_out)
-                
-                if mask_out.any():
-                    # 상한보다 크면 상한으로, 하한보다 작으면 하한으로 (자동)
-                    view.loc[mask_out, "보정_예상공급량(MJ)"] = np.where(
-                        view.loc[mask_out, "예상공급량(MJ)"] > view.loc[mask_out, "Bound_Upper"],
-                        view.loc[mask_out, "Bound_Upper"],
-                        np.where(
-                            view.loc[mask_out, "예상공급량(MJ)"] < view.loc[mask_out, "Bound_Lower"],
-                            view.loc[mask_out, "Bound_Lower"],
-                            view.loc[mask_out, "예상공급량(MJ)"]
-                        )
-                    )
-                    diff_mj = (view.loc[mask_out, "예상공급량(MJ)"] - view.loc[mask_out, "보정_예상공급량(MJ)"]).sum()
-                
-                # --- Step 2: 보정구간 Redistribution ---
-                mask_dist = (view["일자"].dt.date >= start_dist) & (view["일자"].dt.date <= end_dist)
-                sum_ratios = view.loc[mask_dist, "일별비율"].sum()
-                if mask_dist.any() and sum_ratios > 0:
-                    view.loc[mask_dist, "보정_예상공급량(MJ)"] += diff_mj * (view.loc[mask_dist, "일별비율"] / sum_ratios)
+                if len(date_range_out) == 2 and len(date_range_dist) == 2:
+                    start_out, end_out = date_range_out
+                    start_dist, end_dist = date_range_dist
                     
-            st.info(f"💡 변동량: {mj_to_gj(diff_mj):,.0f} GJ (자동 재배분 완료)")
+                    # --- Step 1: 이상구간 Clamp (상한/하한으로 맞춤) ---
+                    mask_out = (view["일자"].dt.date >= start_out) & (view["일자"].dt.date <= end_out)
+                    
+                    if mask_out.any():
+                        # 상한보다 크면 상한으로, 하한보다 작으면 하한으로 (자동)
+                        view.loc[mask_out, "보정_예상공급량(MJ)"] = np.where(
+                            view.loc[mask_out, "예상공급량(MJ)"] > view.loc[mask_out, "Bound_Upper"],
+                            view.loc[mask_out, "Bound_Upper"],
+                            np.where(
+                                view.loc[mask_out, "예상공급량(MJ)"] < view.loc[mask_out, "Bound_Lower"],
+                                view.loc[mask_out, "Bound_Lower"],
+                                view.loc[mask_out, "예상공급량(MJ)"]
+                            )
+                        )
+                        diff_mj = (view.loc[mask_out, "예상공급량(MJ)"] - view.loc[mask_out, "보정_예상공급량(MJ)"]).sum()
+                    
+                    # --- Step 2: 보정구간 Redistribution ---
+                    mask_dist = (view["일자"].dt.date >= start_dist) & (view["일자"].dt.date <= end_dist)
+                    sum_ratios = view.loc[mask_dist, "일별비율"].sum()
+                    if mask_dist.any() and sum_ratios > 0:
+                        view.loc[mask_dist, "보정_예상공급량(MJ)"] += diff_mj * (view.loc[mask_dist, "일별비율"] / sum_ratios)
+                        
+                st.caption(f"💡 변동량: {mj_to_gj(diff_mj):,.0f} GJ (자동 재배분 완료)")
 
     st.markdown("### 🧩 일별 공급량 분배 기준")
     st.markdown(
@@ -739,18 +769,18 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
     fig = go.Figure()
     
-    # 1. [뒤쪽/AS-IS] 기존(원래) 그래프: 원래 형님이 보시던 파랑(평일1), 빨강(평일2), 초록(주말) 등 기본 색상 유지
-    # marker_color 지정 안함 -> Plotly 기본 색상 사용
+    # 1. [뒤쪽/AS-IS] 기존(원래) 그래프: 형님이 원래 보시던 파랑(평일1), 빨강(평일2), 초록(주말) 등 기본 색상 유지
     w1_df = view[view["구분"] == "평일1(월·금)"].copy()
     w2_df = view[view["구분"] == "평일2(화·수·목)"].copy()
     wend_df = view[view["구분"] == "주말/공휴일"].copy()
 
+    # marker_color 지정 안 함 -> Plotly Default Cycle (형님 원래 코드 방식)
     fig.add_bar(x=w1_df["일"], y=w1_df["예상공급량(GJ)"], name="기존(평일1)")
     fig.add_bar(x=w2_df["일"], y=w2_df["예상공급량(GJ)"], name="기존(평일2)")
     fig.add_bar(x=wend_df["일"], y=wend_df["예상공급량(GJ)"], name="기존(주말)")
     
     # 2. [앞쪽/TO-BE] 보정된 값 (활성화 시에만 덮어씌움)
-    # -> "진한 회색(투명도 있음)"으로 덮어 씌우기 (요청사항)
+    # -> "진한 회색(투명도 있음)"으로 덮어 씌우기
     if use_calibration:
         fig.add_bar(
             x=view["일"], 
@@ -792,7 +822,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     **ℹ️ Outlier 기준 및 보정 가이드**
     1. **평일기준 ±10% 초과**: 평일 그룹(월·금 / 화·수·목)의 주간 평균 대비 10%를 벗어나는 경우
     2. **주말기준 ±10% 초과**: 주말/공휴일 그룹의 주간 평균 대비 10%를 벗어나는 경우
-    * 상단 **'🛠️ 이상치 보정 활성화'**를 체크하면 보정된 값(회색)을 비교할 수 있습니다.
+    * 상단 **'🛠️ 이상치 보정 패널'**에서 **'보정 활성화'**를 체크하면 보정된 값(회색)을 비교할 수 있습니다.
     """)
 
     st.markdown("#### 🧊 3. 최근 N년 일별 실적 매트릭스")
