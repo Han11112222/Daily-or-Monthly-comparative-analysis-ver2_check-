@@ -34,7 +34,7 @@ def mj_to_m3(x):
 # 기본 설정
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="도시가스 공급량: 일별계획 예측 (보정기능)",
+    page_title="도시가스 공급량: 일별계획 예측",
     layout="wide",
 )
 
@@ -632,25 +632,26 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     # [NEW] 보정 기능 (Calibration) Logic - 상단 우측
     # ─────────────────────────────────────────────────────────────
     view = df_result.copy()
-    view["보정_예상공급량(MJ)" ] = view["예상공급량(MJ)"] # 초기값은 원본과 동일
+    view["보정_예상공급량(MJ)" ] = view["예상공급량(MJ)"] # 초기값
     
     st.divider()
     
-    # 우측 상단 배치: 1:2 비율로 나누고 오른쪽 컬럼에 패널 배치
-    col_graph_title, col_calib = st.columns([1, 2]) 
+    # [우측 상단 배치]
+    # 왼쪽: 그래프 제목 등 설명 / 오른쪽: 보정 컨트롤 패널
+    col_graph_title, col_calib = st.columns([1, 1]) 
     
     with col_graph_title:
         st.markdown("#### 📊 2. 일별 예상 공급량 & Outlier 분석")
+        st.caption("그래프 우측 상단의 **'이상치 보정 활성화'**를 체크하면 보정 모드로 진입합니다.")
     
-    # 우측 상단: Checkbox와 설정 패널 배치
     with col_calib:
-        c_chk, c_empty = st.columns([1, 2])
-        with c_chk:
-            use_calibration = st.checkbox("✅ 보정 활성화 (Calibration)", value=False)
+        # Checkbox를 바로 노출 (Expander 없이)
+        use_calibration = st.checkbox("✅ 이상치 보정 활성화", value=False)
         
         diff_mj = 0.0
         if use_calibration:
-            with st.expander("세부 보정 설정", expanded=True):
+            # 보정 상세 설정을 Expander로 보여줌
+            with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
                 min_date = view["일자"].min().date()
                 max_date = view["일자"].max().date()
                 
@@ -686,7 +687,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     if mask_dist.any() and sum_ratios > 0:
                         view.loc[mask_dist, "보정_예상공급량(MJ)"] += diff_mj * (view.loc[mask_dist, "일별비율"] / sum_ratios)
                         
-                st.caption(f"💡 변동량: {mj_to_gj(diff_mj):,.0f} GJ (자동 재배분 완료)")
+                st.info(f"💡 변동량: {mj_to_gj(diff_mj):,.0f} GJ (자동 재배분 완료)")
 
     st.markdown("### 🧩 일별 공급량 분배 기준")
     st.markdown(
@@ -741,24 +742,25 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
     fig = go.Figure()
     
+    # 1. [기존/AS-IS] 원래 색상 (파랑/빨강/초록) - 뒤에 깔기
     w1_df = view[view["구분"] == "평일1(월·금)"].copy()
     w2_df = view[view["구분"] == "평일2(화·수·목)"].copy()
     wend_df = view[view["구분"] == "주말/공휴일"].copy()
 
-    # 1. [기존/AS-IS] 원래 색상 (파랑/빨강/초록) - 뒤에 깔기
-    # marker_color를 아예 지정하지 않음 -> Plotly 기본 색상(파랑/빨강/초록) 사용 (형님 원래 코드 방식)
+    # 색상 명시적 지정하지 않음 (형님의 원래 코드 방식 - Plotly 기본 색상 사용)
+    # 보정 활성화 여부와 상관없이 항상 표시
     fig.add_bar(x=w1_df["일"], y=w1_df["예상공급량(GJ)"], name="기존(평일1)")
     fig.add_bar(x=w2_df["일"], y=w2_df["예상공급량(GJ)"], name="기존(평일2)")
     fig.add_bar(x=wend_df["일"], y=wend_df["예상공급량(GJ)"], name="기존(주말)")
     
     # 2. [보정/TO-BE] 보정된 값 (활성화 시에만 덮어씌움)
-    # -> "진한 회색(투명도 있음)"으로 덮어 씌우기
+    # -> "진한 회색(투명도 있음)"으로 덮어 씌우기 (요청사항)
     if use_calibration:
         fig.add_bar(
             x=view["일"], 
             y=view["보정_예상공급량(GJ)"], 
             name="보정 후 (Calibrated)", 
-            marker_color="rgba(60, 60, 60, 0.5)" # 요청하신 투명한 진한 회색
+            marker_color="rgba(60, 60, 60, 0.5)" # 투명한 진한 회색
         )
 
     # 3. 비율 라인
@@ -794,7 +796,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     **ℹ️ Outlier 기준 및 보정 가이드**
     1. **평일기준 ±10% 초과**: 평일 그룹(월·금 / 화·수·목)의 주간 평균 대비 10%를 벗어나는 경우
     2. **주말기준 ±10% 초과**: 주말/공휴일 그룹의 주간 평균 대비 10%를 벗어나는 경우
-    * 상단 **'🛠️ 이상치 보정 패널'**에서 **'보정 활성화'**를 체크하면 보정된 값(회색)을 비교할 수 있습니다.
+    * 상단 **'🛠️ 이상치 보정 (Calibration) 패널'**을 열어 구간을 설정하면, 이상치는 자동으로 한계선(±10%)으로 보정되고 차액은 보정구간에 배분됩니다.
     """)
 
     st.markdown("#### 🧊 3. 최근 N년 일별 실적 매트릭스")
