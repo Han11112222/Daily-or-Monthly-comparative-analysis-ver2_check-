@@ -413,19 +413,20 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
     fig = go.Figure()
 
-    # 1. [기존 그래프] 색상: 평일=파랑, 주말=빨강 (녹색 방지), 너비 통일
+    # 1. [기존 그래프] 색상 및 디자인 변경 (요청사항 반영)
     w1 = view[view["구분"] == "평일1(월·금)"].copy()
     w2 = view[view["구분"] == "평일2(화·수·목)"].copy()
     we = view[view["구분"] == "주말/공휴일"].copy()
 
-    # [수정] width=0.8 추가하여 막대 너비 통일
-    fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월·금)", marker_color="#1F77B4", width=0.8))
-    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화·수·목)", marker_color="#636EFA", width=0.8))
-    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#EF553B", width=0.8))
+    # [수정 1] 막대 색상 변경 (사진과 동일하게)
+    # 평일1: 진한 파랑 (#0059b3), 평일2: 연한 하늘색 (#87CEFA), 주말: 빨강 (#E60000)
+    fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월·금)", marker_color="#0059b3", width=0.8))
+    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화·수·목)", marker_color="#87CEFA", width=0.8))
+    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#E60000", width=0.8))
 
-    # 2. [보정 그래프] ★값이 변경된 날짜만 회색 (Overlay)★
+    # 2. [보정 그래프]
     if use_calib:
-        mask_changed = (abs(view["예상공급량(MJ)"] - view["보정_예상공급량(MJ)"]) > 1) # 미세오차 무시
+        mask_changed = (abs(view["예상공급량(MJ)"] - view["보정_예상공급량(MJ)"]) > 1)
         if mask_changed.any():
             target_view = view[mask_changed]
             fig.add_trace(go.Bar(
@@ -433,13 +434,15 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 y=target_view["보정_예상공급량(GJ)"],
                 marker_color="rgba(80, 80, 80, 0.7)", # 진한 회색
                 name="보정됨",
-                width=0.8 # 너비 통일
+                width=0.8
             ))
 
-    fig.add_trace(go.Scatter(x=view["일"], y=view["일별비율"], yaxis="y2", name="비율", line=dict(color='black', width=1)))
+    # [수정 2] 비율 선 색상 변경 (분홍/살구색) 및 두께 조절
+    fig.add_trace(go.Scatter(x=view["일"], y=view["일별비율"], yaxis="y2", name="비율", line=dict(color='#FF8A80', width=2)))
+    
     fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
-    # [수정] 범위 회색 진하게 (rgba(100,100,100,0.3))
-    fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.3)', name='범위(±10%)'))
+    # [수정 3] 범위 회색 더 진하게 (opacity 0.3 -> 0.45)
+    fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)'))
     
     outliers = view[view["is_outlier"]]
     if not outliers.empty:
