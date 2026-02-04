@@ -32,7 +32,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# 추천 보정 레벨 상태 관리 (None, 2) - 1은 삭제됨
+# 추천 보정 레벨 상태 관리 (None, 2)
 if 'rec_level' not in st.session_state:
     st.session_state['rec_level'] = None
 
@@ -420,7 +420,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             if st.button("🚀 추천 보정"):
                 st.session_state['rec_level'] = 2
                 
-                # --- [Level 2 Logic: 추세 집중] ---
+                # --- [Logic: 추세 집중] ---
                 min_date = view["일자"].min().date()
                 max_date = view["일자"].max().date()
                 outliers = view[view["is_outlier"]]
@@ -450,12 +450,21 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
             min_d = view["일자"].min().date(); max_d = view["일자"].max().date()
             
-            # Defaults from Session State
-            def_start = st.session_state['cal_start'] if st.session_state['cal_start'] else min_d
-            def_end = st.session_state['cal_end'] if st.session_state['cal_end'] else min_d
-            def_fix_s = st.session_state['fix_start'] if st.session_state['fix_start'] else min_d
-            def_fix_e = st.session_state['fix_end'] if st.session_state['fix_end'] else max_d
-            def_rate = st.session_state['rec_rate']
+            # [FIX] 안전장치: 세션 상태의 날짜가 현재 달 범위를 벗어나면 min_d로 초기화
+            def validate_date(d):
+                if d is None: return min_d
+                if d < min_d or d > max_d: return min_d
+                return d
+
+            def_start = validate_date(st.session_state.get('cal_start'))
+            def_end = validate_date(st.session_state.get('cal_end'))
+            def_fix_s = validate_date(st.session_state.get('fix_start'))
+            def_fix_e = validate_date(st.session_state.get('fix_end'))
+            def_rate = st.session_state.get('rec_rate', 0.0)
+
+            # 만약 끝 날짜가 시작 날짜보다 앞에 있다면 강제 보정
+            if def_end < def_start: def_end = def_start
+            if def_fix_e < def_fix_s: def_fix_e = def_fix_s
 
             c1, c2 = st.columns(2)
             d_out = c1.date_input("1. 이상구간 (Outlier)", (def_start, def_end), min_value=min_d, max_value=max_d)
