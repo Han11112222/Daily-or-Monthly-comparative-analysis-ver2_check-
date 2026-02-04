@@ -32,6 +32,13 @@ st.set_page_config(
     layout="wide",
 )
 
+# 세션 상태 초기화 (추천 버튼 기능을 위해 필요)
+if 'cal_start' not in st.session_state: st.session_state['cal_start'] = None
+if 'cal_end' not in st.session_state: st.session_state['cal_end'] = None
+if 'fix_start' not in st.session_state: st.session_state['fix_start'] = None
+if 'fix_end' not in st.session_state: st.session_state['fix_end'] = None
+if 'rec_rate' not in st.session_state: st.session_state['rec_rate'] = 0.0
+
 
 # ─────────────────────────────────────────────
 # 3. 데이터 불러오기
@@ -130,7 +137,6 @@ def format_table_generic(df, percent_cols=None):
     df = df.copy()
     percent_cols = percent_cols or []
     for col in df.columns:
-        # [수정] 날짜 컬럼(일자)에서 시간 제거 (YYYY-MM-DD)
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             df[col] = df[col].dt.strftime('%Y-%m-%d')
         elif df[col].dtype == bool:
@@ -171,7 +177,6 @@ def _add_cumulative_status_sheet(wb, annual_year: int):
 
 def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
     df = df_mj.copy()
-    # 1. 단위 변환
     for base_col in ["최근N년_평균공급량(MJ)", "최근N년_총공급량(MJ)", "예상공급량(MJ)", "보정_예상공급량(MJ)"]:
         if base_col not in df.columns: continue
         gj_col = base_col.replace("(MJ)", "(GJ)")
@@ -179,23 +184,15 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
         df[gj_col] = df[base_col].apply(mj_to_gj).round(0)
         df[m3_col] = df[base_col].apply(mj_to_m3).round(0)
     
-    # 2. 컬럼명 변경 (화면 표시용)
     df_disp = df.rename(columns={
         "예상공급량(GJ)": "As-Is(기존)",
         "보정_예상공급량(GJ)": "To-Be(보정)"
     })
-    
-    # 3. Diff 계산
     if "To-Be(보정)" in df_disp.columns and "As-Is(기존)" in df_disp.columns:
         df_disp["Diff(증감)"] = df_disp["To-Be(보정)"] - df_disp["As-Is(기존)"]
         
-    # 4. [수정] 출력할 컬럼만 딱 남기기 (분석용 컬럼 제거)
-    # weekday_idx 등은 여기서 제외됨
     keep = ["일자", "요일", "구분", "일별비율", "As-Is(기존)", "To-Be(보정)", "Diff(증감)", "is_outlier"]
-    
-    # 존재하는 컬럼만 선택
     final_cols = [c for c in keep if c in df_disp.columns]
-    
     return df_disp[final_cols].copy()
 
 
@@ -388,9 +385,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     plan_total_gj = mj_to_gj(df_result["예상공급량(MJ)"].sum())
     st.markdown(f"**{target_year}년 {target_month}월 합계:** `{plan_total_gj:,.0f} GJ`")
 
-    # ─────────────────────────────────────────────────────────────
-    # [보정 로직]
-    # ─────────────────────────────────────────────────────────────
     view = df_result.copy()
     view["보정_예상공급량(MJ)"] = view["예상공급량(MJ)"]
     
@@ -406,26 +400,75 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     mask_out = pd.Series([False]*len(view))
 
     if use_calib:
-        with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
-            min_d = view["일자"].min().date(); max_d = view["일자"].max().date()
-            
-            c1, c2 = st.columns(2)
-            d_out = c1.date_input("1. 이상구간 (Outlier)", (min_d, min_d), min_value=min_d, max_value=max_d)
-            d_fix = c2.date_input("2. 보정 구간 (Redistribution)", (min_d, max_d), min_value=min_d, max_value=max_d)
-            
-            suggested_rate = 0.0
-            if isinstance(d_out, tuple) and len(d_out) == 2:
-                s, e = d_out
-                target_rows = view[(view["일자"].dt.date >= s) & (view["일자"].dt.date <= e)]
-                if not target_rows.empty:
-                    max_dev = 0.0
-                    for idx, row in target_rows.iterrows():
-                        if row["예상공급량(MJ)"] > row["Bound_Upper"]:
-                            dev = (row["Bound_Upper"] - row["예상공급량(MJ)"]) / row["예상공급량(MJ)"] * 100
-                            if abs(dev) > abs(max_dev): max_dev = dev
-                    suggested_rate = round(max_dev, 1)
+        # ─────────────────────────────────────────────────────────────
+        # [NEW] 추천 보정 버튼 (Level 1, Level 2)
+        # ─────────────────────────────────────────────────────────────
+        c_rec1, c_rec2 = st.columns(2)
+        
+        # 기본값 계산을 위해 한번 더 체크
+        min_date = view["일자"].min().date()
+        max_date = view["일자"].max().date()
+        
+        # 버튼 로직
+        if c_rec1.button("🤖 추천 보정 Level 1 (전체 분산)"):
+            # 가장 큰 Outlier 찾기
+            outliers = view[view["is_outlier"]]
+            if not outliers.empty:
+                # 간단히 가장 많이 튄 날짜 하나만 예시로 잡거나, 연속된 구간을 잡음
+                # 여기서는 가장 큰 편차를 가진 1일을 잡음
+                max_row = outliers.loc[outliers["예상공급량(MJ)"].idxmax()] if not outliers.empty else None
+                if max_row is not None:
+                    # Session State 업데이트 -> 위젯들이 이걸 물고 다시 렌더링됨
+                    st.session_state['cal_start'] = max_row["일자"].date()
+                    st.session_state['cal_end'] = max_row["일자"].date()
+                    
+                    # 비율: 상한선까지 내리기
+                    dev = (max_row["Bound_Upper"] - max_row["예상공급량(MJ)"]) / max_row["예상공급량(MJ)"] * 100
+                    st.session_state['rec_rate'] = float(round(dev, 1))
+                    
+                    # Level 1: 월 전체로 뿌리기
+                    st.session_state['fix_start'] = min_date
+                    st.session_state['fix_end'] = max_date
+                    st.rerun()
 
-            cal_rate = st.number_input("조정 비율 (%)", min_value=-50.0, max_value=50.0, value=float(suggested_rate), step=1.0)
+        if c_rec2.button("🚀 추천 보정 Level 2 (추세 집중)"):
+            # Outlier 찾기는 동일
+            outliers = view[view["is_outlier"]]
+            if not outliers.empty:
+                max_row = outliers.loc[outliers["예상공급량(MJ)"].idxmax()]
+                st.session_state['cal_start'] = max_row["일자"].date()
+                st.session_state['cal_end'] = max_row["일자"].date()
+                
+                dev = (max_row["Bound_Upper"] - max_row["예상공급량(MJ)"]) / max_row["예상공급량(MJ)"] * 100
+                st.session_state['rec_rate'] = float(round(dev, 1))
+                
+                # Level 2: 물량이 가장 많은 주간(Week) 찾기 (추세 반영)
+                # 단, Outlier 날짜는 제외하고 찾기
+                view_clean = view[view["일자"].date() != max_row["일자"].date()]
+                best_week = view_clean.groupby("WeekNum")["예상공급량(MJ)"].sum().idxmax()
+                week_rows = view_clean[view_clean["WeekNum"] == best_week]
+                
+                if not week_rows.empty:
+                    st.session_state['fix_start'] = week_rows["일자"].min().date()
+                    st.session_state['fix_end'] = week_rows["일자"].max().date()
+                else:
+                    st.session_state['fix_start'] = min_date
+                    st.session_state['fix_end'] = max_date
+                st.rerun()
+
+        with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
+            # Session State 값을 Default로 사용
+            def_start = st.session_state['cal_start'] if st.session_state['cal_start'] else min_date
+            def_end = st.session_state['cal_end'] if st.session_state['cal_end'] else min_date
+            def_fix_s = st.session_state['fix_start'] if st.session_state['fix_start'] else min_date
+            def_fix_e = st.session_state['fix_end'] if st.session_state['fix_end'] else max_date
+            def_rate = st.session_state['rec_rate']
+
+            c1, c2 = st.columns(2)
+            d_out = c1.date_input("1. 이상구간 (Outlier)", (def_start, def_end), min_value=min_date, max_value=max_date)
+            d_fix = c2.date_input("2. 보정 구간 (Redistribution)", (def_fix_s, def_fix_e), min_value=min_date, max_value=max_date)
+            
+            cal_rate = st.number_input("조정 비율 (%)", min_value=-50.0, max_value=50.0, value=float(def_rate), step=1.0)
             do_smooth = st.checkbox("🌊 평탄화 적용")
 
             if isinstance(d_out, tuple) and len(d_out) == 2 and isinstance(d_fix, tuple) and len(d_fix) == 2:
@@ -433,6 +476,9 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 
                 mask_out = (view["일자"].dt.date >= s_out) & (view["일자"].dt.date <= e_out)
                 mask_fix = (view["일자"].dt.date >= s_fix) & (view["일자"].dt.date <= e_fix)
+                
+                # ★ [수정] 보정 구간에서 이상 구간은 제외 (중복 방지)
+                mask_fix = mask_fix & (~mask_out)
 
                 if mask_out.any():
                     view.loc[mask_out, "보정_예상공급량(MJ)"] = view.loc[mask_out, "예상공급량(MJ)"] * (1 + cal_rate / 100.0)
@@ -524,8 +570,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         "보정_예상공급량(MJ)": view["보정_예상공급량(MJ)"].sum(),
     }
     view_with_total = pd.concat([view, pd.DataFrame([total_row])], ignore_index=True)
-    
-    # ★ [수정] 표 출력 시 불필요한 컬럼 제거하고 핵심만 표시
     view_show = _make_display_table_gj_m3(view_with_total)
     
     if "is_outlier" in view_show.columns:
