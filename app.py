@@ -190,17 +190,17 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
 # 5. 핵심 분석 로직 (Daily)
 # ─────────────────────────────────────────────
 def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_window, apply_trend=False):
+    # ★ [오류수정 1] 변수 미리 초기화 (NameError 방지)
+    trend_msg = ""
+    
     cal_df = load_effective_calendar()
     plan_col = _find_plan_col(df_plan)
     
-    # [에러수정] 어떤 경우에도 trend_msg는 존재해야 함 (초기화)
-    trend_msg = ""
-
     all_years = sorted(df_daily["연도"].unique())
     start_year = target_year - recent_window
     candidate_years = [y for y in range(start_year, target_year) if y in all_years]
     
-    # [에러수정] Early Exit 시 5개 값 반환
+    # ★ [오류수정 2] Early Exit 시에도 5개 값 반환 (unpacking error 방지)
     if len(candidate_years) == 0: return None, None, [], pd.DataFrame(), ""
     
     df_pool = df_daily[(df_daily["연도"].isin(candidate_years)) & (df_daily["월"] == target_month)].copy()
@@ -319,7 +319,7 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
     plan_col = _find_plan_col(df_plan)
     
     for m in range(1, 13):
-        # [에러수정] 여기도 5개 반환값을 받도록 수정
+        # [수정] 5개 반환값 받기
         res, _, _, _, _ = make_daily_plan_table(df_daily, df_plan, target_year, m, recent_window, apply_trend=False)
         row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == m)]
         plan_total_mj = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else np.nan
@@ -365,13 +365,12 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
     apply_trend = st.checkbox("📉 추세적용 (월초 vs 월말 기온반영)", value=False)
 
-    # [에러수정] 5개 값 받기
     df_result, df_mat, used_years, df_debug, trend_msg = make_daily_plan_table(
         df_daily, df_plan, target_year, target_month, recent_window, apply_trend=apply_trend
     )
 
     if apply_trend and trend_msg:
-        st.info(trend_msg) 
+        st.info(trend_msg)
 
     if df_result is None: st.warning("데이터 부족"); return
     
@@ -379,9 +378,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     plan_total_gj = mj_to_gj(df_result["예상공급량(MJ)"].sum())
     st.markdown(f"**{target_year}년 {target_month}월 합계:** `{plan_total_gj:,.0f} GJ`")
 
-    # ─────────────────────────────────────────────────────────────
-    # [보정 로직]
-    # ─────────────────────────────────────────────────────────────
     view = df_result.copy()
     view["보정_예상공급량(MJ)"] = view["예상공급량(MJ)"]
     
@@ -416,6 +412,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                             if abs(dev) > abs(max_dev): max_dev = dev
                     suggested_rate = round(max_dev, 1)
 
+            # ★ [오류수정 3] MixedNumericTypesError 방지: value를 float으로 명시적 변환
             cal_rate = st.number_input("조정 비율 (%)", min_value=-50.0, max_value=50.0, value=float(suggested_rate), step=1.0)
             do_smooth = st.checkbox("🌊 평탄화 적용")
 
@@ -618,9 +615,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         )
 
 
-# ─────────────────────────────────────────────
-# 메인
-# ─────────────────────────────────────────────
 def main():
     df, _ = load_daily_data()
     mode = st.sidebar.radio("좌측 탭 선택", ("📅 Daily 공급량 분석",), index=0)
