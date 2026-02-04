@@ -176,15 +176,21 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
         df[m3_col] = df[base_col].apply(mj_to_m3).round(0)
     keep = ["연", "월", "일", "요일", "구분", "공휴일여부", "As-Is(기존)", "To-Be(보정)", "Diff(증감)", "일별비율", "is_outlier"]
     
-    # Rename for display logic happens later
-    return df
+    df_disp = df.rename(columns={
+        "예상공급량(GJ)": "As-Is(기존)",
+        "보정_예상공급량(GJ)": "To-Be(보정)"
+    })
+    if "To-Be(보정)" in df_disp.columns and "As-Is(기존)" in df_disp.columns:
+        df_disp["Diff(증감)"] = df_disp["To-Be(보정)"] - df_disp["As-Is(기존)"]
+        
+    return df_disp[[c for c in keep if c in df_disp.columns]].copy()
 
 
 # ─────────────────────────────────────────────
 # 5. 핵심 분석 로직 (Daily)
 # ─────────────────────────────────────────────
 def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_window, apply_trend=False):
-    # ★ [필수] 변수 초기화 (NameError 방지)
+    # ★ [필수 1] 변수 미리 초기화 (NameError 방지)
     trend_msg = ""
     
     cal_df = load_effective_calendar()
@@ -194,7 +200,7 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     start_year = target_year - recent_window
     candidate_years = [y for y in range(start_year, target_year) if y in all_years]
     
-    # ★ [필수] Early Exit 시 5개 값 반환 (Unpacking Error 방지)
+    # ★ [필수 2] 모든 return 경로는 5개 값을 반환해야 함 (Unpacking Error 방지)
     if len(candidate_years) == 0: return None, None, [], pd.DataFrame(), ""
     
     df_pool = df_daily[(df_daily["연도"].isin(candidate_years)) & (df_daily["월"] == target_month)].copy()
@@ -273,8 +279,6 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     
     # ─────────────────────────────────────────────────────────────
     # [NEW] 스마트 추세 적용
-    # 10,11,12월: 월초 < 월말 (추워짐) -> 증가 추세
-    # 1,2,3,4월: 월초 > 월말 (따뜻해짐) -> 감소 추세
     # ─────────────────────────────────────────────────────────────
     if apply_trend:
         days = len(df_target)
@@ -315,7 +319,7 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
     plan_col = _find_plan_col(df_plan)
     
     for m in range(1, 13):
-        # [중요] 여기서도 5개 값을 받아야 함 (안 쓰더라도)
+        # [필수 3] 5개 값 받기 (unused variables = _)
         res, _, _, _, _ = make_daily_plan_table(df_daily, df_plan, target_year, m, recent_window, apply_trend=False)
         row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == m)]
         plan_total_mj = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else np.nan
@@ -382,8 +386,10 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     st.divider()
     
+    # 1. 그래프 자리
     chart_placeholder = st.empty()
     
+    # 2. 버튼 (우측 상단)
     _, col_btn = st.columns([5, 1]) 
     with col_btn:
         use_calib = st.checkbox("✅ 이상치 보정 활성화", value=False)
@@ -411,7 +417,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                             if abs(dev) > abs(max_dev): max_dev = dev
                     suggested_rate = round(max_dev, 1)
 
-            # ★ [필수] MixedNumericType 에러 방지: float() 캐스팅
+            # ★ [필수 4] MixedNumericTypesError 해결: float()로 명시적 변환
             cal_rate = st.number_input("조정 비율 (%)", min_value=-50.0, max_value=50.0, value=float(suggested_rate), step=1.0)
             do_smooth = st.checkbox("🌊 평탄화 적용")
 
@@ -558,7 +564,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     summary_show = format_table_generic(summary_show, percent_cols=["일별비율합계"])
     show_table_no_index(summary_show, height=220)
 
-    # ─────────────── [다운로드 섹션] ───────────────
     st.markdown("#### 💾 6. 데이터 다운로드")
     
     col_down1, col_down2 = st.columns(2)
@@ -615,9 +620,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         )
 
 
-# ─────────────────────────────────────────────
-# 메인
-# ─────────────────────────────────────────────
 def main():
     df, _ = load_daily_data()
     mode = st.sidebar.radio("좌측 탭 선택", ("📅 Daily 공급량 분석",), index=0)
