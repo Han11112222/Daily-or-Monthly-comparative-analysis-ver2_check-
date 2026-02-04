@@ -397,10 +397,8 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     st.divider()
     
-    # 1. 그래프 자리
     chart_placeholder = st.empty()
     
-    # 2. 버튼 (우측 상단)
     _, col_btn = st.columns([5, 1]) 
     with col_btn:
         use_calib = st.checkbox("✅ 이상치 보정 활성화", value=False)
@@ -420,7 +418,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         else:
             if c_rec1.button("🤖 추천 보정 Level 1 (전체 분산)"):
                 st.session_state['rec_level'] = 1
-                # Level 1 Logic Execution
                 min_date = view["일자"].min().date()
                 max_date = view["일자"].max().date()
                 outliers = view[view["is_outlier"]]
@@ -442,7 +439,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         else:
             if c_rec2.button("🚀 추천 보정 Level 2 (추세 집중)"):
                 st.session_state['rec_level'] = 2
-                # Level 2 Logic Execution
                 min_date = view["일자"].min().date()
                 max_date = view["일자"].max().date()
                 outliers = view[view["is_outlier"]]
@@ -468,7 +464,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
             min_d = view["일자"].min().date(); max_d = view["일자"].max().date()
             
-            # Defaults from Session State
             def_start = st.session_state['cal_start'] if st.session_state['cal_start'] else min_d
             def_end = st.session_state['cal_end'] if st.session_state['cal_end'] else min_d
             def_fix_s = st.session_state['fix_start'] if st.session_state['fix_start'] else min_d
@@ -487,7 +482,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 
                 mask_out = (view["일자"].dt.date >= s_out) & (view["일자"].dt.date <= e_out)
                 mask_fix = (view["일자"].dt.date >= s_fix) & (view["일자"].dt.date <= e_fix)
-                # [Fix: Exclude Outlier from Fix range]
                 mask_fix = mask_fix & (~mask_out)
 
                 if mask_out.any():
