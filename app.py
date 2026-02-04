@@ -145,14 +145,11 @@ def show_table_no_index(df: pd.DataFrame, height: int = 260):
     try: st.dataframe(df, use_container_width=True, hide_index=True, height=height)
     except: st.table(df)
 
-def _format_excel_sheet(ws, freeze="A2", center=True, width_map=None):
+def _format_excel_sheet(ws, freeze="A2", center=True):
     if freeze: ws.freeze_panes = freeze
     if center:
         for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
             for c in row: c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    if width_map:
-        for col_letter, w in width_map.items():
-            ws.column_dimensions[col_letter].width = w
 
 def _add_cumulative_status_sheet(wb, annual_year: int):
     sheet_name = "누적계획현황"
@@ -164,7 +161,7 @@ def _add_cumulative_status_sheet(wb, annual_year: int):
     ws["A1"] = "기준일"; ws["B1"] = pd.Timestamp(f"{annual_year}-01-01")
     ws["B1"].number_format = "yyyy-mm-dd"
     
-    headers = ["구분", "목표(GJ)", "누적(GJ)", "목표(m?)", "누적(m?)", "진행률(GJ)"]
+    headers = ["구분", "목표(GJ)", "누적(GJ)", "목표(m³)", "누적(m³)", "진행률(GJ)"]
     for j, h in enumerate(headers, 1):
         ws.cell(row=3, column=j+1, value=h).border = border
     ws.freeze_panes = "A4"
@@ -179,21 +176,17 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
         df[m3_col] = df[base_col].apply(mj_to_m3).round(0)
     keep = ["연", "월", "일", "요일", "구분", "공휴일여부", "As-Is(기존)", "To-Be(보정)", "Diff(증감)", "일별비율", "is_outlier"]
     
-    # Rename for display
-    df_disp = df.rename(columns={
-        "예상공급량(GJ)": "As-Is(기존)",
-        "보정_예상공급량(GJ)": "To-Be(보정)"
-    })
-    if "To-Be(보정)" in df_disp.columns and "As-Is(기존)" in df_disp.columns:
-        df_disp["Diff(증감)"] = df_disp["To-Be(보정)"] - df_disp["As-Is(기존)"]
-        
-    return df_disp[[c for c in keep if c in df_disp.columns]].copy()
+    # Rename for display logic happens later
+    return df
 
 
 # ─────────────────────────────────────────────
 # 5. 핵심 분석 로직 (Daily)
 # ─────────────────────────────────────────────
 def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_window, apply_trend=False):
+    # ★ [필수 1] 변수 미리 초기화 (NameError 방지)
+    trend_msg = ""
+    
     cal_df = load_effective_calendar()
     plan_col = _find_plan_col(df_plan)
     
@@ -201,14 +194,17 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     start_year = target_year - recent_window
     candidate_years = [y for y in range(start_year, target_year) if y in all_years]
     
+    # ★ [필수 2] 모든 return 경로는 5개 값을 반환해야 함 (Unpacking Error 방지)
+    if len(candidate_years) == 0: return None, None, [], pd.DataFrame(), ""
+    
     df_pool = df_daily[(df_daily["연도"].isin(candidate_years)) & (df_daily["월"] == target_month)].copy()
     df_pool = df_pool.dropna(subset=["공급량(MJ)"])
     used_years = sorted(df_pool["연도"].unique().tolist())
-    if not used_years: return None, None, [], pd.DataFrame()
+    if not used_years: return None, None, [], pd.DataFrame(), ""
 
     df_recent = df_daily[(df_daily["연도"].isin(used_years)) & (df_daily["월"] == target_month)].copy()
     df_recent = df_recent.dropna(subset=["공급량(MJ)"])
-    if df_recent.empty: return None, None, used_years, pd.DataFrame()
+    if df_recent.empty: return None, None, used_years, pd.DataFrame(), ""
 
     df_recent = df_recent.sort_values(["연도", "일"]).copy()
     df_recent["weekday_idx"] = df_recent["일자"].dt.weekday
@@ -259,10 +255,11 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     df_target["요일"] = df_target["weekday_idx"].map(lambda x: weekday_names[x])
     df_target["nth_dow"] = df_target.groupby("weekday_idx").cumcount() + 1
 
+    # ★ [수정 1] 인코딩 깨짐 방지: 특수문자 '?' 대신 ',' 사용
     def _get_label(r):
         if r["is_weekend"]: return "주말/공휴일"
-        if r["is_weekday1"]: return "평일1(월?금)"
-        return "평일2(화?수?목)"
+        if r["is_weekday1"]: return "평일1(월,금)"
+        return "평일2(화,수,목)"
     df_target["구분"] = df_target.apply(_get_label, axis=1)
 
     def _apply_ratio(r):
@@ -275,10 +272,22 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     overall_mean = df_target["raw"].mean()
     df_target["raw"] = df_target["raw"].fillna(overall_mean if pd.notna(overall_mean) else 1.0)
     
+    # ─────────────────────────────────────────────────────────────
+    # [NEW] 스마트 추세 적용
+    # ─────────────────────────────────────────────────────────────
     if apply_trend:
         days = len(df_target)
         if days > 1:
-            trend_factors = np.linspace(1.05, 0.95, days)
+            if target_month in [10, 11, 12]:
+                trend_factors = np.linspace(0.95, 1.05, days)
+                trend_msg = f"📈 **{target_month}월 추세 적용**: 월초 대비 월말 기온 하강으로 공급량 **약 5% 증가** 패턴을 적용했습니다."
+            elif target_month in [1, 2, 3, 4]:
+                trend_factors = np.linspace(1.05, 0.95, days)
+                trend_msg = f"📉 **{target_month}월 추세 적용**: 월초 대비 월말 기온 상승으로 공급량 **약 5% 감소** 패턴을 적용했습니다."
+            else:
+                trend_factors = np.ones(days)
+                trend_msg = f"⚖️ **{target_month}월**: 뚜렷한 계절적 증감 추세가 없는 구간입니다."
+
             df_target["raw"] = df_target["raw"] * trend_factors
 
     raw_sum = df_target["raw"].sum()
@@ -298,7 +307,11 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     df_target["최근N년_평균공급량(MJ)"] = 0
     df_target["최근N년_총공급량(MJ)"] = 0
 
-    return df_target, None, used_years, None
+    # ★ [수정 2] 최근 실적 매트릭스 복구를 위해 df_mat(pivot) 생성 및 반환
+    df_mat = df_recent.pivot_table(index="일", columns="연도", values="공급량(MJ)", aggfunc="sum").sort_index(axis=1)
+    df_debug = df_target.copy()
+
+    return df_target, df_mat, used_years, df_debug, trend_msg
 
 def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
     all_rows = []
@@ -306,7 +319,8 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
     plan_col = _find_plan_col(df_plan)
     
     for m in range(1, 13):
-        res, _, _, _ = make_daily_plan_table(df_daily, df_plan, target_year, m, recent_window)
+        # [필수 3] 5개 값 받기 (unused variables = _)
+        res, _, _, _, _ = make_daily_plan_table(df_daily, df_plan, target_year, m, recent_window, apply_trend=False)
         row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == m)]
         plan_total_mj = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else np.nan
         
@@ -349,11 +363,15 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     with col_slider:
         recent_window = st.slider("최근 몇 년 평균?", min_value=slider_min, max_value=slider_max, value=min(3, slider_max), step=1)
 
-    apply_trend = st.checkbox("📉 월말 감소 추세 적용 (월초 > 월말)", value=False)
+    apply_trend = st.checkbox("📉 추세적용 (월초 vs 월말 기온반영)", value=False)
 
-    df_result, df_mat, used_years, df_debug = make_daily_plan_table(
+    # ★ [수정 3] make_daily_plan_table에서 df_mat(매트릭스)를 받아옴
+    df_result, df_mat, used_years, df_debug, trend_msg = make_daily_plan_table(
         df_daily, df_plan, target_year, target_month, recent_window, apply_trend=apply_trend
     )
+
+    if apply_trend and trend_msg:
+        st.info(trend_msg)
 
     if df_result is None: st.warning("데이터 부족"); return
     
@@ -369,12 +387,9 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     st.divider()
     
-    # 1. 그래프 자리
     chart_placeholder = st.empty()
     
-    # 2. 버튼 (우측 상단)
     _, col_btn = st.columns([5, 1]) 
-    
     with col_btn:
         use_calib = st.checkbox("✅ 이상치 보정 활성화", value=False)
         
@@ -401,6 +416,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                             if abs(dev) > abs(max_dev): max_dev = dev
                     suggested_rate = round(max_dev, 1)
 
+            # ★ [필수 4] MixedNumericTypesError 해결: float()로 명시적 변환
             cal_rate = st.number_input("조정 비율 (%)", min_value=-50.0, max_value=50.0, value=float(suggested_rate), step=1.0)
             do_smooth = st.checkbox("🌊 평탄화 적용")
 
@@ -408,11 +424,12 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 s_out, e_out = d_out; s_fix, e_fix = d_fix
                 
                 mask_out = (view["일자"].dt.date >= s_out) & (view["일자"].dt.date <= e_out)
+                mask_fix = (view["일자"].dt.date >= s_fix) & (view["일자"].dt.date <= e_fix)
+
                 if mask_out.any():
                     view.loc[mask_out, "보정_예상공급량(MJ)"] = view.loc[mask_out, "예상공급량(MJ)"] * (1 + cal_rate / 100.0)
                     diff_mj = (view.loc[mask_out, "예상공급량(MJ)"] - view.loc[mask_out, "보정_예상공급량(MJ)"]).sum()
                     
-                    mask_fix = (view["일자"].dt.date >= s_fix) & (view["일자"].dt.date <= e_fix)
                     sum_r = view.loc[mask_fix, "일별비율"].sum()
                     if mask_fix.any() and sum_r > 0:
                         view.loc[mask_fix, "보정_예상공급량(MJ)"] += diff_mj * (view.loc[mask_fix, "일별비율"] / sum_r)
@@ -424,7 +441,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             
             st.caption(f"변동량: {mj_to_gj(diff_mj):,.0f} GJ")
 
-    # ─────────────── [그래프 그리기] ───────────────
     view["예상공급량(GJ)"] = view["예상공급량(MJ)"].apply(mj_to_gj)
     view["보정_예상공급량(GJ)"] = view["보정_예상공급량(MJ)"].apply(mj_to_gj)
     view["Bound_Upper(GJ)"] = view["Bound_Upper"].apply(mj_to_gj)
@@ -432,12 +448,13 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
     fig = go.Figure()
 
-    w1 = view[view["구분"] == "평일1(월?금)"].copy()
-    w2 = view[view["구분"] == "평일2(화?수?목)"].copy()
+    w1 = view[view["구분"] == "평일1(월,금)"].copy()
+    w2 = view[view["구분"] == "평일2(화,수,목)"].copy()
     we = view[view["구분"] == "주말/공휴일"].copy()
 
-    fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월?금)", marker_color="#1F77B4", width=0.8))
-    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화?수?목)", marker_color="#87CEFA", width=0.8))
+    # ★ [수정 1 반영] 라벨 변경에 맞춰 색상 지정
+    fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월,금)", marker_color="#1F77B4", width=0.8))
+    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
     fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#D62728", width=0.8))
 
     if use_calib:
@@ -447,14 +464,14 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             fig.add_trace(go.Bar(
                 x=target_view["일"], 
                 y=target_view["보정_예상공급량(GJ)"],
-                marker_color="rgba(80, 80, 80, 0.7)",
+                marker_color="rgba(80, 80, 80, 0.7)", 
                 name="보정됨(To-Be)",
                 width=0.8
             ))
 
     fig.add_trace(go.Scatter(x=view["일"], y=view["일별비율"], yaxis="y2", name="비율", line=dict(color='#FF8A80', width=2)))
     fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
-    fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(?10%)', hoverinfo='skip'))
+    fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)', hoverinfo='skip'))
     
     outliers = view[view["is_outlier"]]
     if not outliers.empty:
@@ -477,7 +494,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     st.markdown(
         """
 - **주말/공휴일/명절**: **'요일(토/일) + 그 달의 n번째' 기준 평균** (공휴일/명절도 주말 패턴으로 묶음)
-- **평일**: '평일1(월?금)' / '평일2(화?수?목)'로 구분  
+- **평일**: '평일1(월,금)' / '평일2(화,수,목)'로 구분  
   기본은 **'요일 + 그 달의 n번째(1째 월요일, 2째 월요일...)' 기준 평균**
 - 일부 케이스 데이터가 부족하면 **'요일 평균'으로 보정**
 - 마지막에 **일별비율 합계가 1이 되도록 정규화(raw / SUM(raw))**
@@ -508,6 +525,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     view_show = format_table_generic(view_show, percent_cols=["일별비율"])
     show_table_no_index(view_show, height=520)
 
+    # ★ [수정 2] '4. 최근 N년 일별 실적 매트릭스' 복구
     st.markdown("#### 🧊 4. 최근 N년 일별 실적 매트릭스")
     if df_mat is not None:
         df_mat_gj = df_mat.applymap(mj_to_gj)
@@ -547,7 +565,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     summary_show = format_table_generic(summary_show, percent_cols=["일별비율합계"])
     show_table_no_index(summary_show, height=220)
 
-    # ─────────────── [다운로드 섹션: To-Be 기능 추가] ───────────────
     st.markdown("#### 💾 6. 데이터 다운로드")
     
     col_down1, col_down2 = st.columns(2)
@@ -556,26 +573,17 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         if use_calib:
             st.info("💡 보정된(To-Be) 데이터를 다운로드할 수 있습니다.")
             buffer_tobe = BytesIO()
+            dl_src = view_with_total.copy()
+            dl_src["As-Is(기존)"] = dl_src["예상공급량(MJ)"].apply(mj_to_gj).round(0)
+            dl_src["To-Be(보정)"] = dl_src["보정_예상공급량(MJ)"].apply(mj_to_gj).round(0)
+            dl_src["Diff(증감)"] = dl_src["To-Be(보정)"] - dl_src["As-Is(기존)"]
             
-            # [KEYERROR 해결] 먼저 존재하는 컬럼만 선택하고, 그 다음 Rename
-            # view_with_total에는 '예상공급량(GJ)', '보정_예상공급량(GJ)' 등이 있음.
-            cols_to_use = ["일자", "요일", "구분", "예상공급량(GJ)", "보정_예상공급량(GJ)", "is_outlier"]
-            # 만약 is_outlier가 없으면(Total row 등) 에러날 수 있으니 교집합으로 선택
-            valid_cols = [c for c in cols_to_use if c in view_with_total.columns]
+            if "is_outlier" not in dl_src.columns: dl_src["is_outlier"] = ""
+            cols_fin = ["일자", "요일", "구분", "As-Is(기존)", "To-Be(보정)", "Diff(증감)", "is_outlier"]
+            # Total행 등으로 인해 없는 컬럼은 제외
+            cols_fin = [c for c in cols_fin if c in dl_src.columns]
             
-            download_df = view_with_total[valid_cols].copy()
-            
-            # 컬럼명 변경
-            rename_map = {
-                "예상공급량(GJ)": "As-Is(기존)",
-                "보정_예상공급량(GJ)": "To-Be(보정)",
-                "is_outlier": "Outlier"
-            }
-            download_df = download_df.rename(columns=rename_map)
-            
-            # Diff 계산
-            if "To-Be(보정)" in download_df.columns and "As-Is(기존)" in download_df.columns:
-                download_df["Diff(증감)"] = download_df["To-Be(보정)"] - download_df["As-Is(기존)"]
+            download_df = dl_src[cols_fin].copy()
             
             with pd.ExcelWriter(buffer_tobe, engine="openpyxl") as writer:
                 download_df.to_excel(writer, index=False, sheet_name="To-Be_일별계획")
@@ -616,9 +624,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         )
 
 
-# ─────────────────────────────────────────────
-# 메인
-# ─────────────────────────────────────────────
 def main():
     df, _ = load_daily_data()
     mode = st.sidebar.radio("좌측 탭 선택", ("📅 Daily 공급량 분석",), index=0)
