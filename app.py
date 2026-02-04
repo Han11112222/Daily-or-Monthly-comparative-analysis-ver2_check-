@@ -32,7 +32,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# 추천 보정 레벨 상태 관리 (None, 1, 2)
+# 추천 보정 레벨 상태 관리 (None, 2) - 1은 삭제됨
 if 'rec_level' not in st.session_state:
     st.session_state['rec_level'] = None
 
@@ -397,8 +397,10 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     st.divider()
     
+    # 1. 그래프 자리
     chart_placeholder = st.empty()
     
+    # 2. 버튼 (우측 상단)
     _, col_btn = st.columns([5, 1]) 
     with col_btn:
         use_calib = st.checkbox("✅ 이상치 보정 활성화", value=False)
@@ -407,49 +409,33 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     mask_out = pd.Series([False]*len(view))
 
     if use_calib:
-        # [NEW] 추천 보정 버튼 (토글 로직)
-        c_rec1, c_rec2 = st.columns(2)
+        # [NEW] 추천 보정 버튼 (토글 로직) - Level 1 삭제, Level 2만 유지 ('추천 보정')
         
-        # Level 1 Button Toggle
-        if st.session_state['rec_level'] == 1:
-            if c_rec1.button("✅ 추천 보정 Level 1 적용중 (해제)", type="primary"):
-                st.session_state['rec_level'] = None
-                st.rerun()
-        else:
-            if c_rec1.button("🤖 추천 보정 Level 1 (전체 분산)"):
-                st.session_state['rec_level'] = 1
-                min_date = view["일자"].min().date()
-                max_date = view["일자"].max().date()
-                outliers = view[view["is_outlier"]]
-                if not outliers.empty:
-                    max_row = outliers.loc[outliers["예상공급량(MJ)"].idxmax()]
-                    st.session_state['cal_start'] = max_row["일자"].date()
-                    st.session_state['cal_end'] = max_row["일자"].date()
-                    dev = (max_row["Bound_Upper"] - max_row["예상공급량(MJ)"]) / max_row["예상공급량(MJ)"] * 100
-                    st.session_state['rec_rate'] = float(round(dev, 1))
-                    st.session_state['fix_start'] = min_date
-                    st.session_state['fix_end'] = max_date
-                st.rerun()
-
-        # Level 2 Button Toggle
+        # Toggle Logic using 'rec_level' == 2 (Active)
         if st.session_state['rec_level'] == 2:
-            if c_rec2.button("✅ 추천 보정 Level 2 적용중 (해제)", type="primary"):
+            if st.button("✅ 추천 보정 적용중 (해제)", type="primary"):
                 st.session_state['rec_level'] = None
                 st.rerun()
         else:
-            if c_rec2.button("🚀 추천 보정 Level 2 (추세 집중)"):
+            if st.button("🚀 추천 보정"):
                 st.session_state['rec_level'] = 2
+                
+                # --- [Level 2 Logic: 추세 집중] ---
                 min_date = view["일자"].min().date()
                 max_date = view["일자"].max().date()
                 outliers = view[view["is_outlier"]]
+                
                 if not outliers.empty:
+                    # 1. Max Outlier Find
                     max_row = outliers.loc[outliers["예상공급량(MJ)"].idxmax()]
                     st.session_state['cal_start'] = max_row["일자"].date()
                     st.session_state['cal_end'] = max_row["일자"].date()
+                    
+                    # 2. Rate Calc
                     dev = (max_row["Bound_Upper"] - max_row["예상공급량(MJ)"]) / max_row["예상공급량(MJ)"] * 100
                     st.session_state['rec_rate'] = float(round(dev, 1))
                     
-                    # [Fix: AttributeError] .dt.date access
+                    # 3. Target Week Find (Trend Focus)
                     view_clean = view[view["일자"].dt.date != max_row["일자"].date()]
                     if not view_clean.empty:
                         best_week = view_clean.groupby("WeekNum")["예상공급량(MJ)"].sum().idxmax()
@@ -464,6 +450,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
             min_d = view["일자"].min().date(); max_d = view["일자"].max().date()
             
+            # Defaults from Session State
             def_start = st.session_state['cal_start'] if st.session_state['cal_start'] else min_d
             def_end = st.session_state['cal_end'] if st.session_state['cal_end'] else min_d
             def_fix_s = st.session_state['fix_start'] if st.session_state['fix_start'] else min_d
@@ -482,6 +469,8 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 
                 mask_out = (view["일자"].dt.date >= s_out) & (view["일자"].dt.date <= e_out)
                 mask_fix = (view["일자"].dt.date >= s_fix) & (view["일자"].dt.date <= e_fix)
+                
+                # [Fix: Exclude Outlier from Fix range]
                 mask_fix = mask_fix & (~mask_out)
 
                 if mask_out.any():
