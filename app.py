@@ -179,6 +179,7 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
         df[m3_col] = df[base_col].apply(mj_to_m3).round(0)
     keep = ["연", "월", "일", "요일", "구분", "공휴일여부", "As-Is(기존)", "To-Be(보정)", "Diff(증감)", "일별비율", "is_outlier"]
     
+    # Rename for display
     df_disp = df.rename(columns={
         "예상공급량(GJ)": "As-Is(기존)",
         "보정_예상공급량(GJ)": "To-Be(보정)"
@@ -322,7 +323,7 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
     return df_year, pd.DataFrame(month_summary_rows)
 
 # ─────────────────────────────────────────────
-# 6. UI 및 시각화 (형님 지시 100% 반영)
+# 6. UI 및 시각화
 # ─────────────────────────────────────────────
 def tab_daily_plan(df_daily: pd.DataFrame):
     st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
@@ -361,20 +362,17 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     st.markdown(f"**{target_year}년 {target_month}월 합계:** `{plan_total_gj:,.0f} GJ`")
 
     # ─────────────────────────────────────────────────────────────
-    # [수정] 1. 그래프 자리 먼저 생성 (Placeholder)
+    # [보정 로직]
     # ─────────────────────────────────────────────────────────────
     view = df_result.copy()
     view["보정_예상공급량(MJ)"] = view["예상공급량(MJ)"]
     
     st.divider()
     
-    # 그래프를 맨 위에 배치
+    # 1. 그래프 자리
     chart_placeholder = st.empty()
     
-    # ─────────────────────────────────────────────────────────────
-    # [수정] 2. 하단 UI: 제목 삭제 & 버튼 우측 배치
-    # ─────────────────────────────────────────────────────────────
-    # 좌측 제목(4비율) 삭제 -> 빈 공간(5비율) + 우측 버튼(1비율)
+    # 2. 버튼 (우측 상단)
     _, col_btn = st.columns([5, 1]) 
     
     with col_btn:
@@ -382,7 +380,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         
     diff_mj = 0
     mask_out = pd.Series([False]*len(view))
-    mask_fix = pd.Series([False]*len(view))
 
     if use_calib:
         with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
@@ -404,7 +401,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                             if abs(dev) > abs(max_dev): max_dev = dev
                     suggested_rate = round(max_dev, 1)
 
-            # [수정] 에러 방지를 위해 float() 캐스팅 확인
             cal_rate = st.number_input("조정 비율 (%)", min_value=-50.0, max_value=50.0, value=float(suggested_rate), step=1.0)
             do_smooth = st.checkbox("🌊 평탄화 적용")
 
@@ -412,12 +408,11 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 s_out, e_out = d_out; s_fix, e_fix = d_fix
                 
                 mask_out = (view["일자"].dt.date >= s_out) & (view["일자"].dt.date <= e_out)
-                mask_fix = (view["일자"].dt.date >= s_fix) & (view["일자"].dt.date <= e_fix)
-
                 if mask_out.any():
                     view.loc[mask_out, "보정_예상공급량(MJ)"] = view.loc[mask_out, "예상공급량(MJ)"] * (1 + cal_rate / 100.0)
                     diff_mj = (view.loc[mask_out, "예상공급량(MJ)"] - view.loc[mask_out, "보정_예상공급량(MJ)"]).sum()
                     
+                    mask_fix = (view["일자"].dt.date >= s_fix) & (view["일자"].dt.date <= e_fix)
                     sum_r = view.loc[mask_fix, "일별비율"].sum()
                     if mask_fix.any() and sum_r > 0:
                         view.loc[mask_fix, "보정_예상공급량(MJ)"] += diff_mj * (view.loc[mask_fix, "일별비율"] / sum_r)
@@ -437,17 +432,14 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
     fig = go.Figure()
 
-    # 1. [기존 그래프] 색상: 평일1(진파랑), 평일2(하늘색), 주말(빨강)
     w1 = view[view["구분"] == "평일1(월·금)"].copy()
     w2 = view[view["구분"] == "평일2(화·수·목)"].copy()
     we = view[view["구분"] == "주말/공휴일"].copy()
 
-    # [수정] 막대 너비 0.8 통일
     fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월·금)", marker_color="#1F77B4", width=0.8))
-    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화·수·목)", marker_color="#87CEFA", width=0.8)) # 하늘색(보라X)
-    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#D62728", width=0.8)) # 빨강
+    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화·수·목)", marker_color="#87CEFA", width=0.8))
+    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#D62728", width=0.8))
 
-    # 2. [보정 그래프] ★값이 변경된 날짜만 회색 (Overlay)★
     if use_calib:
         mask_changed = (abs(view["예상공급량(MJ)"] - view["보정_예상공급량(MJ)"]) > 1)
         if mask_changed.any():
@@ -455,7 +447,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             fig.add_trace(go.Bar(
                 x=target_view["일"], 
                 y=target_view["보정_예상공급량(GJ)"],
-                marker_color="rgba(80, 80, 80, 0.7)", # 진한 회색
+                marker_color="rgba(80, 80, 80, 0.7)",
                 name="보정됨(To-Be)",
                 width=0.8
             ))
@@ -477,7 +469,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         legend=dict(orientation="h", y=1.1)
     )
     
-    # ★★★ 그래프 렌더링 (맨 위) ★★★
     chart_placeholder.plotly_chart(fig, use_container_width=True)
     
     st.divider()
@@ -498,6 +489,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     show_table_no_index(format_table_generic(df_plan_h), height=160)
 
     st.markdown("#### 📋 3. 일별 비율, 예상 공급량 테이블")
+    
     total_row = {
         "연": "", "월": "", "일": "", "일자": "", "요일": "합계",
         "weekday_idx": "", "nth_dow": "", "구분": "", "공휴일여부": False,
@@ -555,7 +547,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     summary_show = format_table_generic(summary_show, percent_cols=["일별비율합계"])
     show_table_no_index(summary_show, height=220)
 
-    # ─────────────── [수정] 6. 데이터 다운로드 (최하단) ───────────────
+    # ─────────────── [다운로드 섹션: To-Be 기능 추가] ───────────────
     st.markdown("#### 💾 6. 데이터 다운로드")
     
     col_down1, col_down2 = st.columns(2)
@@ -564,12 +556,30 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         if use_calib:
             st.info("💡 보정된(To-Be) 데이터를 다운로드할 수 있습니다.")
             buffer_tobe = BytesIO()
-            download_df = view_with_total[["일자", "요일", "구분", "As-Is(기존)", "To-Be(보정)", "Outlier"]].copy()
-            download_df.columns = ["일자", "요일", "구분", "As-Is(기존)", "To-Be(보정)", "Outlier"]
-            download_df["Diff(증감)"] = download_df["To-Be(보정)"] - download_df["As-Is(기존)"]
+            
+            # [KEYERROR 해결] 먼저 존재하는 컬럼만 선택하고, 그 다음 Rename
+            # view_with_total에는 '예상공급량(GJ)', '보정_예상공급량(GJ)' 등이 있음.
+            cols_to_use = ["일자", "요일", "구분", "예상공급량(GJ)", "보정_예상공급량(GJ)", "is_outlier"]
+            # 만약 is_outlier가 없으면(Total row 등) 에러날 수 있으니 교집합으로 선택
+            valid_cols = [c for c in cols_to_use if c in view_with_total.columns]
+            
+            download_df = view_with_total[valid_cols].copy()
+            
+            # 컬럼명 변경
+            rename_map = {
+                "예상공급량(GJ)": "As-Is(기존)",
+                "보정_예상공급량(GJ)": "To-Be(보정)",
+                "is_outlier": "Outlier"
+            }
+            download_df = download_df.rename(columns=rename_map)
+            
+            # Diff 계산
+            if "To-Be(보정)" in download_df.columns and "As-Is(기존)" in download_df.columns:
+                download_df["Diff(증감)"] = download_df["To-Be(보정)"] - download_df["As-Is(기존)"]
             
             with pd.ExcelWriter(buffer_tobe, engine="openpyxl") as writer:
                 download_df.to_excel(writer, index=False, sheet_name="To-Be_일별계획")
+                
             st.download_button(
                 label="📥 To-Be(보정후) 일별계획 다운로드", 
                 data=buffer_tobe.getvalue(), 
