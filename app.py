@@ -145,6 +145,9 @@ def format_table_generic(df, percent_cols=None):
             df[col] = df[col].dt.strftime('%Y-%m-%d')
         elif df[col].dtype == bool:
             df[col] = df[col].map(lambda x: "O" if x else "")
+        elif col == "Diff(%)": 
+            # [NEW] 증감률 전용 포맷팅 (소수점 1자리)
+            df[col] = df[col].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "")
         elif col in percent_cols:
             df[col] = df[col].map(lambda x: f"{x:.4f}" if pd.notna(x) else "")
         elif pd.api.types.is_numeric_dtype(df[col]):
@@ -192,10 +195,17 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
         "예상공급량(GJ)": "As-Is(기존)",
         "보정_예상공급량(GJ)": "To-Be(보정)"
     })
+    
+    # Diff 계산
     if "To-Be(보정)" in df_disp.columns and "As-Is(기존)" in df_disp.columns:
         df_disp["Diff(증감)"] = df_disp["To-Be(보정)"] - df_disp["As-Is(기존)"]
+        # [NEW] 증감률(%) 계산
+        # 0으로 나누는 경우 방지 및 퍼센트 계산
+        df_disp["Diff(%)"] = df_disp.apply(
+            lambda row: (row["Diff(증감)"] / row["As-Is(기존)"] * 100) if row["As-Is(기존)"] != 0 else 0, axis=1
+        )
         
-    keep = ["일자", "요일", "구분", "일별비율", "As-Is(기존)", "To-Be(보정)", "Diff(증감)", "is_outlier"]
+    keep = ["일자", "요일", "구분", "일별비율", "As-Is(기존)", "To-Be(보정)", "Diff(증감)", "Diff(%)", "is_outlier"]
     final_cols = [c for c in keep if c in df_disp.columns]
     return df_disp[final_cols].copy()
 
@@ -450,21 +460,12 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
             min_d = view["일자"].min().date(); max_d = view["일자"].max().date()
             
-            # [FIX] 안전장치: 세션 상태의 날짜가 현재 달 범위를 벗어나면 min_d로 초기화
-            def validate_date(d):
-                if d is None: return min_d
-                if d < min_d or d > max_d: return min_d
-                return d
-
-            def_start = validate_date(st.session_state.get('cal_start'))
-            def_end = validate_date(st.session_state.get('cal_end'))
-            def_fix_s = validate_date(st.session_state.get('fix_start'))
-            def_fix_e = validate_date(st.session_state.get('fix_end'))
-            def_rate = st.session_state.get('rec_rate', 0.0)
-
-            # 만약 끝 날짜가 시작 날짜보다 앞에 있다면 강제 보정
-            if def_end < def_start: def_end = def_start
-            if def_fix_e < def_fix_s: def_fix_e = def_fix_s
+            # Defaults from Session State
+            def_start = st.session_state['cal_start'] if st.session_state['cal_start'] else min_d
+            def_end = st.session_state['cal_end'] if st.session_state['cal_end'] else min_d
+            def_fix_s = st.session_state['fix_start'] if st.session_state['fix_start'] else min_d
+            def_fix_e = st.session_state['fix_end'] if st.session_state['fix_end'] else max_d
+            def_rate = st.session_state['rec_rate']
 
             c1, c2 = st.columns(2)
             d_out = c1.date_input("1. 이상구간 (Outlier)", (def_start, def_end), min_value=min_d, max_value=max_d)
@@ -633,8 +634,13 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             dl_src["To-Be(보정)"] = dl_src["보정_예상공급량(MJ)"].apply(mj_to_gj).round(0)
             dl_src["Diff(증감)"] = dl_src["To-Be(보정)"] - dl_src["As-Is(기존)"]
             
+            # Diff(%) 계산 (다운로드용)
+            dl_src["Diff(%)"] = dl_src.apply(
+                lambda row: (row["Diff(증감)"] / row["As-Is(기존)"] * 100) if row["As-Is(기존)"] != 0 else 0, axis=1
+            )
+
             if "is_outlier" not in dl_src.columns: dl_src["is_outlier"] = ""
-            cols_fin = ["일자", "요일", "구분", "As-Is(기존)", "To-Be(보정)", "Diff(증감)", "is_outlier"]
+            cols_fin = ["일자", "요일", "구분", "As-Is(기존)", "To-Be(보정)", "Diff(증감)", "Diff(%)", "is_outlier"]
             cols_fin = [c for c in cols_fin if c in dl_src.columns]
             
             download_df = dl_src[cols_fin].copy()
