@@ -32,7 +32,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# 추천 보정 레벨 상태 관리 (None, 2)
+# 추천 보정 레벨 상태 관리
 if 'rec_level' not in st.session_state:
     st.session_state['rec_level'] = None
 
@@ -64,6 +64,10 @@ def load_daily_data():
         df_raw["연도"] = df_raw["일자"].dt.year
         df_raw["월"] = df_raw["일자"].dt.month
         df_raw["일"] = df_raw["일자"].dt.day
+        
+        # [NEW] 전년도 패턴 찾기를 위해 미리 요일/주차 정보 생성
+        df_raw["weekday_idx"] = df_raw["일자"].dt.weekday
+        df_raw["nth_dow"] = df_raw.groupby(["연도", "월", "weekday_idx"]).cumcount() + 1
 
         df_temp_all = df_raw.dropna(subset=["평균기온(℃)"]).copy()
         df_model = df_raw.dropna(subset=["공급량(MJ)"]).copy()
@@ -146,7 +150,6 @@ def format_table_generic(df, percent_cols=None):
         elif df[col].dtype == bool:
             df[col] = df[col].map(lambda x: "O" if x else "")
         elif col == "Diff(%)": 
-            # [NEW] 증감률 전용 포맷팅 (소수점 1자리)
             df[col] = df[col].map(lambda x: f"{x:.1f}%" if pd.notna(x) else "")
         elif col in percent_cols:
             df[col] = df[col].map(lambda x: f"{x:.4f}" if pd.notna(x) else "")
@@ -199,8 +202,6 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
     # Diff 계산
     if "To-Be(보정)" in df_disp.columns and "As-Is(기존)" in df_disp.columns:
         df_disp["Diff(증감)"] = df_disp["To-Be(보정)"] - df_disp["As-Is(기존)"]
-        # [NEW] 증감률(%) 계산
-        # 0으로 나누는 경우 방지 및 퍼센트 계산
         df_disp["Diff(%)"] = df_disp.apply(
             lambda row: (row["Diff(증감)"] / row["As-Is(기존)"] * 100) if row["As-Is(기존)"] != 0 else 0, axis=1
         )
@@ -251,6 +252,8 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
 
     df_recent["month_total"] = df_recent.groupby("연도")["공급량(MJ)"].transform("sum")
     df_recent["ratio"] = df_recent["공급량(MJ)"] / df_recent["month_total"]
+    # nth_dow는 위에서 load_daily_data시 계산했지만, target월 기준으로 다시 계산 필요할 수 있음
+    # 여기서는 df_recent 자체의 nth_dow를 다시 계산
     df_recent["nth_dow"] = df_recent.groupby(["연도", "weekday_idx"]).cumcount() + 1
 
     def get_ratio_dict(mask):
@@ -407,10 +410,8 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     st.divider()
     
-    # 1. 그래프 자리
     chart_placeholder = st.empty()
     
-    # 2. 버튼 (우측 상단)
     _, col_btn = st.columns([5, 1]) 
     with col_btn:
         use_calib = st.checkbox("✅ 이상치 보정 활성화", value=False)
@@ -419,33 +420,27 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     mask_out = pd.Series([False]*len(view))
 
     if use_calib:
-        # [NEW] 추천 보정 버튼 (토글 로직) - Level 1 삭제, Level 2만 유지 ('추천 보정')
+        c_rec1, c_rec2 = st.columns(2)
         
-        # Toggle Logic using 'rec_level' == 2 (Active)
+        # [기존] 추천 보정 버튼
         if st.session_state['rec_level'] == 2:
-            if st.button("✅ 추천 보정 적용중 (해제)", type="primary"):
+            if c_rec1.button("✅ 추천 보정 적용중 (해제)", type="primary"):
                 st.session_state['rec_level'] = None
                 st.rerun()
         else:
-            if st.button("🚀 추천 보정"):
+            if c_rec1.button("🚀 추천 보정"):
                 st.session_state['rec_level'] = 2
-                
-                # --- [Logic: 추세 집중] ---
                 min_date = view["일자"].min().date()
                 max_date = view["일자"].max().date()
                 outliers = view[view["is_outlier"]]
                 
                 if not outliers.empty:
-                    # 1. Max Outlier Find
                     max_row = outliers.loc[outliers["예상공급량(MJ)"].idxmax()]
                     st.session_state['cal_start'] = max_row["일자"].date()
                     st.session_state['cal_end'] = max_row["일자"].date()
-                    
-                    # 2. Rate Calc
                     dev = (max_row["Bound_Upper"] - max_row["예상공급량(MJ)"]) / max_row["예상공급량(MJ)"] * 100
                     st.session_state['rec_rate'] = float(round(dev, 1))
                     
-                    # 3. Target Week Find (Trend Focus)
                     view_clean = view[view["일자"].dt.date != max_row["일자"].date()]
                     if not view_clean.empty:
                         best_week = view_clean.groupby("WeekNum")["예상공급량(MJ)"].sum().idxmax()
@@ -460,17 +455,60 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         with st.expander("🛠️ 보정 구간 및 재배분 설정", expanded=True):
             min_d = view["일자"].min().date(); max_d = view["일자"].max().date()
             
-            # Defaults from Session State
-            def_start = st.session_state['cal_start'] if st.session_state['cal_start'] else min_d
-            def_end = st.session_state['cal_end'] if st.session_state['cal_end'] else min_d
-            def_fix_s = st.session_state['fix_start'] if st.session_state['fix_start'] else min_d
-            def_fix_e = st.session_state['fix_end'] if st.session_state['fix_end'] else max_d
-            def_rate = st.session_state['rec_rate']
+            def validate_date(d):
+                if d is None: return min_d
+                if d < min_d or d > max_d: return min_d
+                return d
+
+            def_start = validate_date(st.session_state.get('cal_start'))
+            def_end = validate_date(st.session_state.get('cal_end'))
+            def_fix_s = validate_date(st.session_state.get('fix_start'))
+            def_fix_e = validate_date(st.session_state.get('fix_end'))
+            def_rate = st.session_state.get('rec_rate', 0.0)
+
+            if def_end < def_start: def_end = def_start
+            if def_fix_e < def_fix_s: def_fix_e = def_fix_s
 
             c1, c2 = st.columns(2)
             d_out = c1.date_input("1. 이상구간 (Outlier)", (def_start, def_end), min_value=min_d, max_value=max_d)
             d_fix = c2.date_input("2. 보정 구간 (Redistribution)", (def_fix_s, def_fix_e), min_value=min_d, max_value=max_d)
             
+            # [NEW] 전년도 실적 적용 버튼 (보정구간 하단)
+            if st.button("📅 전년도 실적 적용 (요일/주차 패턴 매칭)"):
+                if isinstance(d_fix, tuple) and len(d_fix) == 2:
+                    s_f, e_f = d_fix
+                    target_mask = (view["일자"].dt.date >= s_f) & (view["일자"].dt.date <= e_f)
+                    
+                    # 로직: 해당 날짜의 (월, weekday, nth_dow)를 구하고 -> 전년도 데이터(df_daily)에서 매칭
+                    prev_year = target_year - 1
+                    
+                    for idx, row in view[target_mask].iterrows():
+                        cur_month = row["월"]
+                        cur_wd = row["weekday_idx"]
+                        cur_nth = row["nth_dow"]
+                        
+                        # 전년도 같은 패턴 찾기
+                        match = df_daily[
+                            (df_daily["연도"] == prev_year) &
+                            (df_daily["월"] == cur_month) &
+                            (df_daily["weekday_idx"] == cur_wd) &
+                            (df_daily["nth_dow"] == cur_nth)
+                        ]
+                        
+                        if not match.empty:
+                            # 매칭 성공 시 전년도 값 적용
+                            prev_val = match.iloc[0]["공급량(MJ)"]
+                            view.loc[idx, "보정_예상공급량(MJ)"] = prev_val
+                        else:
+                            # 매칭 실패 시 (예: 전년도에 5주차가 없음) -> 날짜 기준 -364일(52주) 전 근사치
+                            fallback_date = row["일자"] - pd.Timedelta(weeks=52)
+                            match_fb = df_daily[df_daily["일자"] == fallback_date]
+                            if not match_fb.empty:
+                                view.loc[idx, "보정_예상공급량(MJ)"] = match_fb.iloc[0]["공급량(MJ)"]
+                    
+                    # 적용 후 재계산 불필요 (직접 할당했으므로)
+                    st.success(f"{prev_year}년도 동일 요일/주차 패턴 실적이 적용되었습니다!")
+
             cal_rate = st.number_input("조정 비율 (%)", min_value=-50.0, max_value=50.0, value=float(def_rate), step=1.0)
             do_smooth = st.checkbox("🌊 평탄화 적용")
 
@@ -479,12 +517,17 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 
                 mask_out = (view["일자"].dt.date >= s_out) & (view["일자"].dt.date <= e_out)
                 mask_fix = (view["일자"].dt.date >= s_fix) & (view["일자"].dt.date <= e_fix)
-                
-                # [Fix: Exclude Outlier from Fix range]
                 mask_fix = mask_fix & (~mask_out)
 
                 if mask_out.any():
+                    # 이상구간 비율 조정
                     view.loc[mask_out, "보정_예상공급량(MJ)"] = view.loc[mask_out, "예상공급량(MJ)"] * (1 + cal_rate / 100.0)
+                    
+                    # 차이 계산 -> 보정구간 배분 (단, 전년도 버튼 누르면 이미 값이 바뀌어있을 수 있음. 버튼은 '덮어쓰기' 개념)
+                    # 여기서는 '자동 배분' 로직이 돌기 때문에, 전년도 버튼과 섞이면 복잡해질 수 있음.
+                    # 우선순위: 전년도 버튼 누르면 그 값이 고정됨 -> 이후 이 로직이 덮어쓸 수 있음.
+                    # 따라서 전년도 버튼은 일회성 동작으로 처리됨 (위 if문에서 처리)
+                    
                     diff_mj = (view.loc[mask_out, "예상공급량(MJ)"] - view.loc[mask_out, "보정_예상공급량(MJ)"]).sum()
                     
                     sum_r = view.loc[mask_fix, "일별비율"].sum()
@@ -509,19 +552,21 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     w2 = view[view["구분"] == "평일2(화,수,목)"].copy()
     we = view[view["구분"] == "주말/공휴일"].copy()
 
+    # Base Trace (As-Is)
     fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월,금)", marker_color="#1F77B4", width=0.8))
     fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
     fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#D62728", width=0.8))
 
     if use_calib:
-        # [Fix: Visual] Gray only changed amounts
+        # [NEW] Difference Overlay
+        # 값이 '변경된' 부분만 회색 반투명으로 덮어씌움 (Overlay mode 활용)
         mask_changed = (abs(view["예상공급량(MJ)"] - view["보정_예상공급량(MJ)"]) > 1)
         if mask_changed.any():
             target_view = view[mask_changed]
             fig.add_trace(go.Bar(
                 x=target_view["일"], 
                 y=target_view["보정_예상공급량(GJ)"],
-                marker_color="rgba(80, 80, 80, 0.7)", 
+                marker_color="rgba(100, 100, 100, 0.6)", # 회색 반투명
                 name="보정됨(To-Be)",
                 width=0.8
             ))
@@ -539,7 +584,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         xaxis_title="일",
         yaxis=dict(title="공급량(GJ)"),
         yaxis2=dict(title="비율", overlaying="y", side="right"),
-        barmode="overlay", 
+        barmode="overlay", # 중요: 겹쳐서 표현
         legend=dict(orientation="h", y=1.1)
     )
     
@@ -634,7 +679,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             dl_src["To-Be(보정)"] = dl_src["보정_예상공급량(MJ)"].apply(mj_to_gj).round(0)
             dl_src["Diff(증감)"] = dl_src["To-Be(보정)"] - dl_src["As-Is(기존)"]
             
-            # Diff(%) 계산 (다운로드용)
+            # Diff(%) 계산
             dl_src["Diff(%)"] = dl_src.apply(
                 lambda row: (row["Diff(증감)"] / row["As-Is(기존)"] * 100) if row["As-Is(기존)"] != 0 else 0, axis=1
             )
