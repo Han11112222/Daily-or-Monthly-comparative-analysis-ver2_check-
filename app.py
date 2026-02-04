@@ -32,7 +32,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# 세션 상태 초기화
 if 'rec_active' not in st.session_state: st.session_state['rec_active'] = False
 if 'prev_active' not in st.session_state: st.session_state['prev_active'] = False
 
@@ -405,7 +404,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     chart_placeholder = st.empty()
 
-    # ★ [수정] 업로드 파일 단위 자동 보정 (MJ -> GJ)
+    # ★ [수정] 업로드 파일: 날짜 필터링 + 단위 보정 + 중복 제거
     if uploaded_file is not None:
         try:
             df_up = pd.read_excel(uploaded_file)
@@ -420,65 +419,77 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             if target_col and "일자" in df_up.columns:
                 df_up["일자"] = pd.to_datetime(df_up["일자"])
                 
-                # [강제 형변환] 콤마 제거 및 숫자 변환
-                if df_up[target_col].dtype == object:
-                    df_up[target_col] = pd.to_numeric(df_up[target_col].astype(str).str.replace(',', ''), errors='coerce')
+                # ★ [핵심 1] 현재 선택된 연/월 데이터만 필터링 (600k 중복 합산 방지)
+                df_up = df_up[
+                    (df_up["일자"].dt.year == target_year) & 
+                    (df_up["일자"].dt.month == target_month)
+                ].copy()
                 
-                if as_is_col and df_up[as_is_col].dtype == object:
-                    df_up[as_is_col] = pd.to_numeric(df_up[as_is_col].astype(str).str.replace(',', ''), errors='coerce')
+                # 중복 제거 (혹시 같은 날짜가 2번 있으면 drop)
+                df_up = df_up.drop_duplicates(subset=["일자"], keep="last")
 
-                # [단위 보정] 50만 넘으면 MJ로 간주 -> GJ로 변환 (형님 파일 데이터: 1.8억 -> 18만)
-                if df_up[target_col].mean() > 500000:
-                    df_up[target_col] = df_up[target_col] * 0.001
-                    if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
-                    st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
-
-                df_up["weekday_idx"] = df_up["일자"].dt.weekday
-                df_up["is_weekend"] = df_up["weekday_idx"] >= 5
-                df_up["is_weekday1"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([0, 4]))
-                df_up["is_weekday2"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([1, 2, 3]))
-                
-                def _get_label_up(r):
-                    if r["is_weekend"]: return "주말/공휴일"
-                    if r["is_weekday1"]: return "평일1(월,금)"
-                    return "평일2(화,수,목)"
-                df_up["구분"] = df_up.apply(_get_label_up, axis=1)
-                
-                fig_up = go.Figure()
-                
-                # As-Is 그리기
-                if as_is_col:
-                    u1 = df_up[df_up["구분"] == "평일1(월,금)"]
-                    u2 = df_up[df_up["구분"] == "평일2(화,수,목)"]
-                    ue = df_up[df_up["구분"] == "주말/공휴일"]
-                    
-                    fig_up.add_trace(go.Bar(x=u1["일자"].dt.day, y=u1[as_is_col], name="As-Is: 평일1(월,금)", marker_color="#1F77B4", width=0.8))
-                    fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[as_is_col], name="As-Is: 평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
-                    fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[as_is_col], name="As-Is: 주말/공휴일", marker_color="#D62728", width=0.8))
-                
-                # To-Be 그리기 (회색 Overlay)
-                if as_is_col:
-                    mask_changed = (abs(df_up[as_is_col] - df_up[target_col]) > 1)
-                    target_view = df_up[mask_changed]
+                if df_up.empty:
+                    st.warning(f"⚠️ 업로드된 파일에 {target_year}년 {target_month}월 데이터가 없습니다.")
                 else:
-                    target_view = df_up
+                    # [강제 형변환] 콤마 제거 및 숫자 변환
+                    if df_up[target_col].dtype == object:
+                        df_up[target_col] = pd.to_numeric(df_up[target_col].astype(str).str.replace(',', ''), errors='coerce')
+                    
+                    if as_is_col and df_up[as_is_col].dtype == object:
+                        df_up[as_is_col] = pd.to_numeric(df_up[as_is_col].astype(str).str.replace(',', ''), errors='coerce')
 
-                fig_up.add_trace(go.Bar(
-                    x=target_view["일자"].dt.day, 
-                    y=target_view[target_col],
-                    marker_color="rgba(100, 100, 100, 0.6)", 
-                    name="To-Be(보정)",
-                    width=0.8
-                ))
-                
-                fig_up.update_layout(
-                    title=f"📂 업로드 데이터: {uploaded_file.name}",
-                    xaxis_title="일",
-                    yaxis=dict(title="공급량(GJ)"),
-                    barmode="overlay",
-                    legend=dict(orientation="h", y=1.1)
-                )
-                st.plotly_chart(fig_up, use_container_width=True)
+                    # ★ [핵심 2] 단위 보정 (50만 넘으면 MJ로 간주 -> GJ로 변환)
+                    if df_up[target_col].mean() > 500000:
+                        df_up[target_col] = df_up[target_col] * 0.001
+                        if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
+                        st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
+
+                    df_up["weekday_idx"] = df_up["일자"].dt.weekday
+                    df_up["is_weekend"] = df_up["weekday_idx"] >= 5
+                    df_up["is_weekday1"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([0, 4]))
+                    df_up["is_weekday2"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([1, 2, 3]))
+                    
+                    def _get_label_up(r):
+                        if r["is_weekend"]: return "주말/공휴일"
+                        if r["is_weekday1"]: return "평일1(월,금)"
+                        return "평일2(화,수,목)"
+                    df_up["구분"] = df_up.apply(_get_label_up, axis=1)
+                    
+                    fig_up = go.Figure()
+                    
+                    # As-Is 그리기
+                    if as_is_col:
+                        u1 = df_up[df_up["구분"] == "평일1(월,금)"]
+                        u2 = df_up[df_up["구분"] == "평일2(화,수,목)"]
+                        ue = df_up[df_up["구분"] == "주말/공휴일"]
+                        
+                        fig_up.add_trace(go.Bar(x=u1["일자"].dt.day, y=u1[as_is_col], name="As-Is: 평일1(월,금)", marker_color="#1F77B4", width=0.8))
+                        fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[as_is_col], name="As-Is: 평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
+                        fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[as_is_col], name="As-Is: 주말/공휴일", marker_color="#D62728", width=0.8))
+                    
+                    # To-Be 그리기 (회색 Overlay)
+                    if as_is_col:
+                        mask_changed = (abs(df_up[as_is_col] - df_up[target_col]) > 1)
+                        target_view = df_up[mask_changed]
+                    else:
+                        target_view = df_up
+
+                    fig_up.add_trace(go.Bar(
+                        x=target_view["일자"].dt.day, 
+                        y=target_view[target_col],
+                        marker_color="rgba(100, 100, 100, 0.6)", 
+                        name="To-Be(보정)",
+                        width=0.8
+                    ))
+                    
+                    fig_up.update_layout(
+                        title=f"📂 업로드 데이터 ({target_year}년 {target_month}월): {uploaded_file.name}",
+                        xaxis_title="일",
+                        yaxis=dict(title="공급량(GJ)"),
+                        barmode="overlay",
+                        legend=dict(orientation="h", y=1.1)
+                    )
+                    st.plotly_chart(fig_up, use_container_width=True)
             else:
                 st.warning("⚠️ 업로드된 파일에 '일자' 또는 'To-Be(보정)_최종' 컬럼이 없습니다.")
                 
