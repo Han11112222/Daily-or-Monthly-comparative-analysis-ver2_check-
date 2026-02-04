@@ -32,7 +32,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# 세션 상태 초기화
 if 'rec_active' not in st.session_state: st.session_state['rec_active'] = False
 if 'prev_active' not in st.session_state: st.session_state['prev_active'] = False
 
@@ -398,37 +397,43 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     plan_total_gj = mj_to_gj(df_result["예상공급량(MJ)"].sum())
     st.markdown(f"**{target_year}년 {target_month}월 합계:** `{plan_total_gj:,.0f} GJ`")
 
-    # ─────────────────────────────────────────────────────────────
-    # [보정 로직]
-    # ─────────────────────────────────────────────────────────────
     view = df_result.copy()
     view["보정_예상공급량(MJ)"] = view["예상공급량(MJ)"]
     
     st.divider()
     
-    # 1. 메인 그래프 자리
     chart_placeholder = st.empty()
 
-    # ★ [추가] 업로드된 파일 그래프 (단위 자동 변환 포함)
+    # ★ [수정] 업로드 파일 단위 보정 (MJ -> GJ)
     if uploaded_file is not None:
         try:
             df_up = pd.read_excel(uploaded_file)
+            
+            # 컬럼명 유연하게 찾기
             target_col = None
+            as_is_col = None
+            
             for c in df_up.columns:
-                if "To-Be" in c and "최종" in c:
-                    target_col = c
-                    break
+                if "To-Be" in c and "최종" in c: target_col = c
+                if "As-Is" in c: as_is_col = c
             
             if target_col and "일자" in df_up.columns:
                 df_up["일자"] = pd.to_datetime(df_up["일자"])
                 
-                # ★ [핵심 수정] 단위가 크면(예: 1억 이상) MJ로 간주하고 GJ로 변환
-                if df_up[target_col].mean() > 1000000:
-                    df_up[target_col] = df_up[target_col].apply(mj_to_gj)
+                # [강제 형변환] 콤마 제거 및 숫자 변환
+                if df_up[target_col].dtype == object:
+                    df_up[target_col] = pd.to_numeric(df_up[target_col].astype(str).str.replace(',', ''), errors='coerce')
+                
+                if as_is_col and df_up[as_is_col].dtype == object:
+                    df_up[as_is_col] = pd.to_numeric(df_up[as_is_col].astype(str).str.replace(',', ''), errors='coerce')
+
+                # [단위 보정] 50만 넘으면 MJ로 간주하고 나누기 1000
+                if df_up[target_col].mean() > 500000:
+                    df_up[target_col] = df_up[target_col] * 0.001
+                    if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
                     st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
 
                 df_up["weekday_idx"] = df_up["일자"].dt.weekday
-                
                 df_up["is_weekend"] = df_up["weekday_idx"] >= 5
                 df_up["is_weekday1"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([0, 4]))
                 df_up["is_weekday2"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([1, 2, 3]))
@@ -440,13 +445,32 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 df_up["구분"] = df_up.apply(_get_label_up, axis=1)
                 
                 fig_up = go.Figure()
-                u1 = df_up[df_up["구분"] == "평일1(월,금)"]
-                u2 = df_up[df_up["구분"] == "평일2(화,수,목)"]
-                ue = df_up[df_up["구분"] == "주말/공휴일"]
                 
-                fig_up.add_trace(go.Bar(x=u1["일자"].dt.day, y=u1[target_col], name="평일1(월,금)", marker_color="#1F77B4", width=0.8))
-                fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[target_col], name="평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
-                fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[target_col], name="주말/공휴일", marker_color="#D62728", width=0.8))
+                # As-Is 그리기 (있으면)
+                if as_is_col:
+                    u1 = df_up[df_up["구분"] == "평일1(월,금)"]
+                    u2 = df_up[df_up["구분"] == "평일2(화,수,목)"]
+                    ue = df_up[df_up["구분"] == "주말/공휴일"]
+                    
+                    fig_up.add_trace(go.Bar(x=u1["일자"].dt.day, y=u1[as_is_col], name="As-Is: 평일1(월,금)", marker_color="#1F77B4", width=0.8))
+                    fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[as_is_col], name="As-Is: 평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
+                    fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[as_is_col], name="As-Is: 주말/공휴일", marker_color="#D62728", width=0.8))
+                
+                # To-Be 그리기 (회색 Overlay)
+                # 차이를 구해서 바뀐 부분만 그리는 로직 적용
+                if as_is_col:
+                    mask_changed = (abs(df_up[as_is_col] - df_up[target_col]) > 1)
+                    target_view = df_up[mask_changed]
+                else:
+                    target_view = df_up # As-Is 없으면 전체 그림
+
+                fig_up.add_trace(go.Bar(
+                    x=target_view["일자"].dt.day, 
+                    y=target_view[target_col],
+                    marker_color="rgba(100, 100, 100, 0.6)", 
+                    name="To-Be(보정)",
+                    width=0.8
+                ))
                 
                 fig_up.update_layout(
                     title=f"📂 업로드 데이터: {uploaded_file.name}",
