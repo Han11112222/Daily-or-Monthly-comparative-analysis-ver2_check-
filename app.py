@@ -32,7 +32,8 @@ st.set_page_config(
     layout="wide",
 )
 
-# 세션 상태 초기화 (버튼 토글 및 설정값 유지용)
+# 세션 상태 초기화
+if 'rec_level' not in st.session_state: st.session_state['rec_level'] = None
 if 'rec_active' not in st.session_state: st.session_state['rec_active'] = False
 if 'prev_active' not in st.session_state: st.session_state['prev_active'] = False
 
@@ -64,7 +65,6 @@ def load_daily_data():
         df_raw["월"] = df_raw["일자"].dt.month
         df_raw["일"] = df_raw["일자"].dt.day
         
-        # 전년도 패턴 매칭을 위한 요일/주차 정보 미리 생성
         df_raw["weekday_idx"] = df_raw["일자"].dt.weekday
         df_raw["nth_dow"] = df_raw.groupby(["연도", "월", "weekday_idx"]).cumcount() + 1
 
@@ -249,7 +249,6 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
 
     df_recent["month_total"] = df_recent.groupby("연도")["공급량(MJ)"].transform("sum")
     df_recent["ratio"] = df_recent["공급량(MJ)"] / df_recent["month_total"]
-    # nth_dow 재계산 (월별 기준)
     df_recent["nth_dow"] = df_recent.groupby(["연도", "weekday_idx"]).cumcount() + 1
 
     def get_ratio_dict(mask):
@@ -362,6 +361,9 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
 def tab_daily_plan(df_daily: pd.DataFrame):
     st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
 
+    # 1. 파일 업로드 기능 (좌측 사이드바)
+    uploaded_file = st.sidebar.file_uploader("📂 비교할 엑셀 파일 업로드", type=["xlsx"])
+
     df_plan = load_monthly_plan()
     plan_col = _find_plan_col(df_plan)
     years_plan = sorted(df_plan["연"].unique())
@@ -398,16 +400,74 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     plan_total_gj = mj_to_gj(df_result["예상공급량(MJ)"].sum())
     st.markdown(f"**{target_year}년 {target_month}월 합계:** `{plan_total_gj:,.0f} GJ`")
 
-    # ─────────────────────────────────────────────────────────────
-    # [보정 로직]
-    # ─────────────────────────────────────────────────────────────
     view = df_result.copy()
     view["보정_예상공급량(MJ)"] = view["예상공급량(MJ)"]
     
     st.divider()
     
-    # 1. 그래프 자리
+    # 1. 메인 그래프 자리
     chart_placeholder = st.empty()
+
+    # ★ [추가] 업로드된 파일 그래프 (Main Graph 바로 아래)
+    if uploaded_file is not None:
+        try:
+            # 1. 파일 읽기 및 전처리
+            df_up = pd.read_excel(uploaded_file)
+            
+            # 컬럼 매핑 확인 (형님 양식: 연, 월, 일, 예상공급량(GJ) 등)
+            if all(col in df_up.columns for col in ['연', '월', '일']):
+                # 날짜 생성
+                df_up['일자'] = pd.to_datetime(df_up[['연', '월', '일']].astype(str).agg('-'.join, axis=1))
+                
+                # 요일/구분 생성 (색상을 위해)
+                df_up["weekday_idx"] = df_up["일자"].dt.weekday
+                
+                # 타겟 데이터 찾기 (GJ)
+                target_col = None
+                for c in df_up.columns:
+                    if "GJ" in c and "예상" in c: target_col = c; break
+                    if "As-Is" in c: target_col = c; break
+                
+                if target_col:
+                    # 구분 생성 로직 (Main과 동일하게)
+                    # 공휴일 정보는 없으므로 주말만 체크
+                    df_up["is_weekend"] = df_up["weekday_idx"] >= 5
+                    df_up["is_weekday1"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([0, 4])) # 월,금
+                    df_up["is_weekday2"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([1, 2, 3])) # 화,수,목
+                    
+                    def _get_label_up(r):
+                        if r["is_weekend"]: return "주말/공휴일"
+                        if r["is_weekday1"]: return "평일1(월,금)"
+                        return "평일2(화,수,목)"
+                    df_up["구분"] = df_up.apply(_get_label_up, axis=1)
+                    
+                    # 그래프 그리기
+                    fig_up = go.Figure()
+                    
+                    u1 = df_up[df_up["구분"] == "평일1(월,금)"]
+                    u2 = df_up[df_up["구분"] == "평일2(화,수,목)"]
+                    ue = df_up[df_up["구분"] == "주말/공휴일"]
+                    
+                    fig_up.add_trace(go.Bar(x=u1["일"], y=u1[target_col], name="평일1(월,금)", marker_color="#1F77B4", width=0.8))
+                    fig_up.add_trace(go.Bar(x=u2["일"], y=u2[target_col], name="평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
+                    fig_up.add_trace(go.Bar(x=ue["일"], y=ue[target_col], name="주말/공휴일", marker_color="#D62728", width=0.8))
+                    
+                    fig_up.update_layout(
+                        title=f"📂 업로드 파일 데이터: {uploaded_file.name}",
+                        xaxis_title="일",
+                        yaxis=dict(title="공급량(GJ)"),
+                        barmode="overlay",
+                        legend=dict(orientation="h", y=1.1)
+                    )
+                    
+                    st.plotly_chart(fig_up, use_container_width=True)
+                else:
+                    st.warning("⚠️ 업로드된 파일에서 '예상공급량(GJ)' 관련 컬럼을 찾을 수 없습니다.")
+            else:
+                st.warning("⚠️ 업로드된 파일에 '연', '월', '일' 컬럼이 있어야 합니다.")
+                
+        except Exception as e:
+            st.error(f"파일 처리 중 오류 발생: {e}")
     
     # 2. 버튼 (우측 상단)
     _, col_btn = st.columns([5, 1]) 
@@ -524,14 +584,11 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 mask_fix = mask_fix & (~mask_out)
 
                 if mask_out.any():
-                    # 만약 전년도 적용이 켜져있다면, 이상구간 값은 유지하고 재배분만 할 수도 있으나
-                    # 여기서는 사용자 입력(조정 비율)이 더 우선순위라고 가정하고 덮어씀
                     view.loc[mask_out, "보정_예상공급량(MJ)"] = view.loc[mask_out, "예상공급량(MJ)"] * (1 + cal_rate / 100.0)
                     diff_mj = (view.loc[mask_out, "예상공급량(MJ)"] - view.loc[mask_out, "보정_예상공급량(MJ)"]).sum()
                     
                     sum_r = view.loc[mask_fix, "일별비율"].sum()
                     if mask_fix.any() and sum_r > 0:
-                        # 전년도 실적 적용 여부와 관계없이, 잉여 물량은 보정 구간에 더해짐
                         view.loc[mask_fix, "보정_예상공급량(MJ)"] += diff_mj * (view.loc[mask_fix, "일별비율"] / sum_r)
                         if do_smooth:
                             target_total = view.loc[mask_fix, "보정_예상공급량(MJ)"].sum()
@@ -583,7 +640,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         xaxis_title="일",
         yaxis=dict(title="공급량(GJ)"),
         yaxis2=dict(title="비율", overlaying="y", side="right"),
-        barmode="overlay", # 겹쳐보기 모드
+        barmode="overlay", # 중요: 겹쳐서 표현
         legend=dict(orientation="h", y=1.1)
     )
     
