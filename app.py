@@ -360,7 +360,6 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
 def tab_daily_plan(df_daily: pd.DataFrame):
     st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
 
-    # [NEW] 파일 업로드 (좌측 사이드바)
     uploaded_file = st.sidebar.file_uploader("📂 비교용 엑셀 파일 업로드", type=["xlsx"])
 
     df_plan = load_monthly_plan()
@@ -410,11 +409,10 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     # 1. 메인 그래프 자리
     chart_placeholder = st.empty()
 
-    # ★ [추가] 업로드된 파일의 그래프 그리기 (메인 그래프 아래)
+    # ★ [추가] 업로드된 파일 그래프 (단위 자동 변환 포함)
     if uploaded_file is not None:
         try:
             df_up = pd.read_excel(uploaded_file)
-            # 'To-Be(보정)_최종' 컬럼이 있는지 확인 (대소문자/공백 등 유연하게)
             target_col = None
             for c in df_up.columns:
                 if "To-Be" in c and "최종" in c:
@@ -423,9 +421,14 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             
             if target_col and "일자" in df_up.columns:
                 df_up["일자"] = pd.to_datetime(df_up["일자"])
+                
+                # ★ [핵심 수정] 단위가 크면(예: 1억 이상) MJ로 간주하고 GJ로 변환
+                if df_up[target_col].mean() > 1000000:
+                    df_up[target_col] = df_up[target_col].apply(mj_to_gj)
+                    st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
+
                 df_up["weekday_idx"] = df_up["일자"].dt.weekday
                 
-                # 메인과 동일한 구분 로직
                 df_up["is_weekend"] = df_up["weekday_idx"] >= 5
                 df_up["is_weekday1"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([0, 4]))
                 df_up["is_weekday2"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([1, 2, 3]))
@@ -436,7 +439,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     return "평일2(화,수,목)"
                 df_up["구분"] = df_up.apply(_get_label_up, axis=1)
                 
-                # 그래프 그리기
                 fig_up = go.Figure()
                 u1 = df_up[df_up["구분"] == "평일1(월,금)"]
                 u2 = df_up[df_up["구분"] == "평일2(화,수,목)"]
@@ -470,7 +472,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     if use_calib:
         c_rec1, c_rec2 = st.columns(2)
         
-        # [1] 추천 보정 (기존 Level 2)
         if st.session_state['rec_active']:
             if c_rec1.button("✅ 추천 보정 적용중 (해제)", type="primary"):
                 st.session_state['rec_active'] = False
@@ -520,7 +521,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             d_out = c1.date_input("1. 이상구간 (Outlier)", (def_start, def_end), min_value=min_d, max_value=max_d)
             d_fix = c2.date_input("2. 보정 구간 (Redistribution)", (def_fix_s, def_fix_e), min_value=min_d, max_value=max_d)
             
-            # [2] 전년도 실적 적용 버튼 (토글)
             if st.session_state['prev_active']:
                 if st.button("✅ 전년도 실적 적용중 (해제)", type="primary"):
                     st.session_state['prev_active'] = False
@@ -533,14 +533,10 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             cal_rate = st.number_input("조정 비율 (%)", min_value=-50.0, max_value=50.0, value=float(def_rate), step=1.0)
             do_smooth = st.checkbox("🌊 평탄화 적용")
 
-            # ────────────────────────────────────────────────────────
-            # 1. 전년도 패턴 적용 로직 (우선 적용)
-            # ────────────────────────────────────────────────────────
             if st.session_state['prev_active']:
                 if isinstance(d_fix, tuple) and len(d_fix) == 2:
                     s_f, e_f = d_fix
                     target_mask = (view["일자"].dt.date >= s_f) & (view["일자"].dt.date <= e_f)
-                    
                     prev_year = target_year - 1
                     for idx, row in view[target_mask].iterrows():
                         cur_month = row["월"]
@@ -562,9 +558,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                             if not match_fb.empty:
                                 view.loc[idx, "보정_예상공급량(MJ)"] = match_fb.iloc[0]["공급량(MJ)"]
 
-            # ────────────────────────────────────────────────────────
-            # 2. 이상구간 및 재배분 로직 (후순위)
-            # ────────────────────────────────────────────────────────
             if isinstance(d_out, tuple) and len(d_out) == 2 and isinstance(d_fix, tuple) and len(d_fix) == 2:
                 s_out, e_out = d_out; s_fix, e_fix = d_fix
                 
@@ -598,20 +591,18 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     w2 = view[view["구분"] == "평일2(화,수,목)"].copy()
     we = view[view["구분"] == "주말/공휴일"].copy()
 
-    # Base Trace (As-Is)
     fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월,금)", marker_color="#1F77B4", width=0.8))
     fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
     fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#D62728", width=0.8))
 
     if use_calib:
-        # [Fix: Overlay Graph]
         mask_changed = (abs(view["예상공급량(MJ)"] - view["보정_예상공급량(MJ)"]) > 1)
         if mask_changed.any():
             target_view = view[mask_changed]
             fig.add_trace(go.Bar(
                 x=target_view["일"], 
                 y=target_view["보정_예상공급량(GJ)"],
-                marker_color="rgba(100, 100, 100, 0.6)", # 투명도 있는 회색
+                marker_color="rgba(100, 100, 100, 0.6)", 
                 name="보정됨(To-Be)",
                 width=0.8
             ))
@@ -629,7 +620,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
         xaxis_title="일",
         yaxis=dict(title="공급량(GJ)"),
         yaxis2=dict(title="비율", overlaying="y", side="right"),
-        barmode="overlay", # 중요: 겹쳐서 표현
+        barmode="overlay", 
         legend=dict(orientation="h", y=1.1)
     )
     
@@ -724,7 +715,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             dl_src["To-Be(보정)"] = dl_src["보정_예상공급량(MJ)"].apply(mj_to_gj).round(0)
             dl_src["Diff(증감)"] = dl_src["To-Be(보정)"] - dl_src["As-Is(기존)"]
             
-            # Diff(%) 계산
             dl_src["Diff(%)"] = dl_src.apply(
                 lambda row: (row["Diff(증감)"] / row["As-Is(기존)"] * 100) if row["As-Is(기존)"] != 0 else 0, axis=1
             )
