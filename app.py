@@ -413,7 +413,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             target_col = None
             as_is_col = None
             
-            # 컬럼 찾기 (대소문자/공백 등 유연하게)
             for c in df_up.columns:
                 if "To-Be" in c and "최종" in c: target_col = c
                 if "As-Is" in c: as_is_col = c
@@ -421,14 +420,14 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             if target_col and "일자" in df_up.columns:
                 df_up["일자"] = pd.to_datetime(df_up["일자"])
                 
-                # 1. 문자열 -> 숫자 강제 변환 (콤마 제거)
+                # [강제 형변환] 콤마 제거 및 숫자 변환
                 if df_up[target_col].dtype == object:
                     df_up[target_col] = pd.to_numeric(df_up[target_col].astype(str).str.replace(',', ''), errors='coerce')
                 
                 if as_is_col and df_up[as_is_col].dtype == object:
                     df_up[as_is_col] = pd.to_numeric(df_up[as_is_col].astype(str).str.replace(',', ''), errors='coerce')
 
-                # 2. 단위 보정 (50만 넘으면 MJ로 간주 -> GJ로 변환)
+                # [단위 보정] 50만 넘으면 MJ로 간주 -> GJ로 변환 (형님 파일 데이터: 1.8억 -> 18만)
                 if df_up[target_col].mean() > 500000:
                     df_up[target_col] = df_up[target_col] * 0.001
                     if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
@@ -447,7 +446,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 
                 fig_up = go.Figure()
                 
-                # As-Is 그리기 (있으면)
+                # As-Is 그리기
                 if as_is_col:
                     u1 = df_up[df_up["구분"] == "평일1(월,금)"]
                     u2 = df_up[df_up["구분"] == "평일2(화,수,목)"]
