@@ -359,7 +359,8 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
 def tab_daily_plan(df_daily: pd.DataFrame):
     st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
 
-    uploaded_file = st.sidebar.file_uploader("📂 비교용 엑셀 파일 업로드", type=["xlsx"])
+    # [NEW] 파일 업로드 (xlsx, csv 모두 허용)
+    uploaded_file = st.sidebar.file_uploader("📂 비교용 엑셀/CSV 파일 업로드", type=["xlsx", "csv"])
 
     df_plan = load_monthly_plan()
     plan_col = _find_plan_col(df_plan)
@@ -404,10 +405,14 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     chart_placeholder = st.empty()
 
-    # ★ [수정] 업로드 파일: 날짜 필터링 + 단위 보정 + 중복 제거 + 시스템 As-Is 연동
+    # ★ [수정] 파일 처리: 만능 리더기 + Normalize + Groupby + Merge
     if uploaded_file is not None:
         try:
-            df_up = pd.read_excel(uploaded_file)
+            # 1. 파일 확장자에 따라 읽기 방식 분기
+            if uploaded_file.name.endswith('.csv'):
+                df_up = pd.read_csv(uploaded_file)
+            else:
+                df_up = pd.read_excel(uploaded_file)
             
             target_col = None
             as_is_col = None
@@ -419,12 +424,14 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             if target_col and "일자" in df_up.columns:
                 df_up["일자"] = pd.to_datetime(df_up["일자"])
                 
-                # ★ [핵심 1] 시간을 00:00:00으로 통일 (Normalize)하여 1,2일 외 불일치 해결
+                # ★ [핵심 1] 시간 제거 (Normalize)
                 df_up["일자"] = df_up["일자"].dt.normalize()
                 
-                # 날짜 필터링 (메인 그래프의 1일~말일 범위만 남김 -> 29일/30일 제거)
-                view_dates = set(view["일자"].dt.date)
-                df_up = df_up[df_up["일자"].dt.date.isin(view_dates)].copy()
+                # 날짜 필터링
+                df_up = df_up[
+                    (df_up["일자"].dt.year == target_year) & 
+                    (df_up["일자"].dt.month == target_month)
+                ].copy()
                 
                 if df_up.empty:
                     st.warning(f"⚠️ 업로드된 파일에 {target_year}년 {target_month}월 데이터가 없습니다.")
@@ -435,7 +442,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     if as_is_col and df_up[as_is_col].dtype == object:
                         df_up[as_is_col] = pd.to_numeric(df_up[as_is_col].astype(str).str.replace(',', ''), errors='coerce')
 
-                    # ★ [핵심 2] 중복 날짜 합치기 (평균) -> 600k 방지
+                    # ★ [핵심 2] Groupby로 중복 날짜 합치기 (600k 방지)
                     agg_dict = {target_col: 'mean'}
                     if as_is_col: agg_dict[as_is_col] = 'mean'
                     df_up = df_up.groupby("일자", as_index=False).agg(agg_dict)
@@ -446,14 +453,12 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                         if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
                         st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
 
-                    # ★ [핵심 3] As-Is 누락 시 메인 데이터에서 가져오기 (회색 현상 해결)
-                    # 메인 데이터(view)와 날짜 기준 병합 (Left Join)
+                    # ★ [핵심 3] 메인 데이터와 Merge (회색선 및 As-Is 보완)
                     view_base = view[["일자", "예상공급량(GJ)", "Bound_Upper", "Bound_Lower"]].copy()
-                    view_base["일자"] = view_base["일자"].dt.normalize() # 안전장치
+                    view_base["일자"] = view_base["일자"].dt.normalize() 
                     
                     df_merged = view_base.merge(df_up, on="일자", how="left")
                     
-                    # 업로드 파일에 As-Is가 없거나 0이면 메인 데이터 사용
                     final_as_is = "Final_As_Is"
                     if as_is_col:
                         df_merged[final_as_is] = df_merged[as_is_col].fillna(df_merged["예상공급량(GJ)"])
@@ -462,11 +467,9 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     else:
                         df_merged[final_as_is] = df_merged["예상공급량(GJ)"]
 
-                    # Bound 단위 변환
                     df_merged["Bound_Upper(GJ)"] = df_merged["Bound_Upper"].apply(mj_to_gj)
                     df_merged["Bound_Lower(GJ)"] = df_merged["Bound_Lower"].apply(mj_to_gj)
 
-                    # 시각화용 컬럼 생성
                     df_merged["weekday_idx"] = df_merged["일자"].dt.weekday
                     df_merged["is_weekend"] = df_merged["weekday_idx"] >= 5
                     df_merged["is_weekday1"] = (~df_merged["is_weekend"]) & (df_merged["weekday_idx"].isin([0, 4]))
@@ -480,7 +483,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     
                     fig_up = go.Figure()
                     
-                    # As-Is (System + Upload Fallback)
+                    # As-Is
                     u1 = df_merged[df_merged["구분"] == "평일1(월,금)"]
                     u2 = df_merged[df_merged["구분"] == "평일2(화,수,목)"]
                     ue = df_merged[df_merged["구분"] == "주말/공휴일"]
@@ -491,7 +494,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     
                     # To-Be (Overlay)
                     if target_col in df_merged.columns:
-                        # 차이가 있는 부분만 그리기
                         mask_changed = (abs(df_merged[final_as_is] - df_merged[target_col]) > 1)
                         target_view = df_merged[mask_changed]
                         
@@ -503,7 +505,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                             width=0.8
                         ))
                     
-                    # ★ [핵심 4] 회색 범위 라인 추가 (메인과 동일)
+                    # Bound Line
                     fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
                     fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)', hoverinfo='skip'))
 
