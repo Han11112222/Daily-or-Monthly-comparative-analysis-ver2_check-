@@ -53,6 +53,7 @@ def load_daily_data():
 
     try:
         df_raw = pd.read_excel(excel_path)
+        # 필요한 컬럼만 추출 및 이름 통일
         required = ["일자", "공급량(MJ)", "공급량(M3)", "평균기온(℃)"]
         cols = [c for c in required if c in df_raw.columns]
         df_raw = df_raw[cols].copy()
@@ -62,6 +63,7 @@ def load_daily_data():
         df_raw["월"] = df_raw["일자"].dt.month
         df_raw["일"] = df_raw["일자"].dt.day
         
+        # 미리 계산
         df_raw["weekday_idx"] = df_raw["일자"].dt.weekday
         df_raw["nth_dow"] = df_raw.groupby(["연도", "월", "weekday_idx"]).cumcount() + 1
 
@@ -229,7 +231,7 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     df_recent = df_recent.dropna(subset=["공급량(MJ)"])
     if df_recent.empty: return None, None, used_years, pd.DataFrame(), ""
 
-    # [형님 로직] 전처리
+    # [형님 로직] 데이터 전처리
     df_recent = df_recent.sort_values(["연도", "일"]).copy()
     df_recent["weekday_idx"] = df_recent["일자"].dt.weekday
 
@@ -384,6 +386,13 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     
     df_target["예상공급량(MJ)"] = (df_target["일별비율"] * plan_total).round(0)
     
+    # [Bound 추가]
+    df_target["WeekNum"] = df_target["일자"].dt.isocalendar().week
+    df_target["Group_Mean"] = df_target.groupby(["WeekNum", "is_weekend"])["예상공급량(MJ)"].transform("mean")
+    df_target["Bound_Upper"] = df_target["Group_Mean"] * 1.10
+    df_target["Bound_Lower"] = df_target["Group_Mean"] * 0.90
+    df_target["is_outlier"] = (df_target["예상공급량(MJ)"] > df_target["Bound_Upper"]) | (df_target["예상공급량(MJ)"] < df_target["Bound_Lower"])
+
     df_mat = df_recent.pivot_table(index="일", columns="연도", values="공급량(MJ)", aggfunc="sum").sort_index(axis=1)
     df_debug = df_target.copy()
 
@@ -455,13 +464,11 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     plan_total_gj = mj_to_gj(df_result["예상공급량(MJ)"].sum())
     st.markdown(f"**{target_year}년 {target_month}월 합계:** `{plan_total_gj:,.0f} GJ`")
 
-    # [중요] 계산 로직을 여기로 끌어올려 1번 그래프와 2번 그래프가 모두 사용할 수 있게 함
     view = df_result.copy()
     view["보정_예상공급량(MJ)"] = view["예상공급량(MJ)"]
     view["예상공급량(GJ)"] = view["예상공급량(MJ)"].apply(mj_to_gj)
     view["보정_예상공급량(GJ)"] = view["보정_예상공급량(MJ)"].apply(mj_to_gj)
     
-    # 2번 그래프를 위한 Bound 계산
     view["WeekNum"] = view["일자"].dt.isocalendar().week
     view["Group_Mean"] = view.groupby(["WeekNum", "is_weekend"])["예상공급량(MJ)"].transform("mean")
     view["Bound_Upper"] = view["Group_Mean"] * 1.10
@@ -474,17 +481,14 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     chart_placeholder = st.empty()
 
-    # ★ 파일 처리: 무적 로더 + Normalize + Groupby + Merge
     if uploaded_file is not None:
         try:
             file_bytes = uploaded_file.getvalue()
             df_up = None
             
-            # (1) 엑셀 시도
             try: df_up = pd.read_excel(BytesIO(file_bytes))
             except: pass
             
-            # (2) CSV 시도
             if df_up is None:
                 for enc in ['utf-8', 'cp949', 'euc-kr']:
                     try: df_up = pd.read_csv(BytesIO(file_bytes), encoding=enc); break
@@ -569,10 +573,13 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                             mask_changed = (abs(df_merged[final_as_is] - df_merged[target_col]) > 1)
                             target_view = df_merged[mask_changed]
                             
+                            # [수정] To-Be 막대 테두리 추가 (진한 선)
                             fig_up.add_trace(go.Bar(
                                 x=target_view["일자"].dt.day, 
                                 y=target_view[target_col],
-                                marker_color="rgba(100, 100, 100, 0.6)", 
+                                marker_color="rgba(100, 100, 100, 0.4)", 
+                                marker_line_color="rgba(60, 60, 60, 1.0)",
+                                marker_line_width=2,
                                 name="To-Be(보정)",
                                 width=0.8
                             ))
@@ -711,6 +718,11 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                                 view.loc[mask_fix, "보정_예상공급량(MJ)"] = ideal_pattern * (target_total / ideal_pattern.sum())
             
             st.caption(f"변동량: {mj_to_gj(diff_mj):,.0f} GJ")
+
+    view["예상공급량(GJ)"] = view["예상공급량(MJ)"].apply(mj_to_gj)
+    view["보정_예상공급량(GJ)"] = view["보정_예상공급량(MJ)"].apply(mj_to_gj)
+    view["Bound_Upper(GJ)"] = view["Bound_Upper"].apply(mj_to_gj)
+    view["Bound_Lower(GJ)"] = view["Bound_Lower"].apply(mj_to_gj)
 
     fig = go.Figure()
 
