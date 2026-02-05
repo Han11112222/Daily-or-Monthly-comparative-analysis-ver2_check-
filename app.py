@@ -404,7 +404,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     chart_placeholder = st.empty()
 
-    # ★ [수정] 업로드 파일: 날짜 필터링 + 단위 보정 + 중복 제거(Groupby Mean) + 회색 범위
+    # ★ [수정] 업로드 파일: 시간 제거(Normalize) + 중복 제거 + 회색 범위
     if uploaded_file is not None:
         try:
             df_up = pd.read_excel(uploaded_file)
@@ -419,7 +419,10 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             if target_col and "일자" in df_up.columns:
                 df_up["일자"] = pd.to_datetime(df_up["일자"])
                 
-                # 1. 날짜 필터링
+                # ★ [핵심 1] 시간을 00:00:00으로 통일 (Normalize)하여 날짜 불일치 제거
+                df_up["일자"] = df_up["일자"].dt.normalize()
+                
+                # 날짜 필터링
                 df_up = df_up[
                     (df_up["일자"].dt.year == target_year) & 
                     (df_up["일자"].dt.month == target_month)
@@ -428,25 +431,33 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 if df_up.empty:
                     st.warning(f"⚠️ 업로드된 파일에 {target_year}년 {target_month}월 데이터가 없습니다.")
                 else:
-                    # 2. 강제 형변환
+                    # 강제 형변환
                     if df_up[target_col].dtype == object:
                         df_up[target_col] = pd.to_numeric(df_up[target_col].astype(str).str.replace(',', ''), errors='coerce')
                     if as_is_col and df_up[as_is_col].dtype == object:
                         df_up[as_is_col] = pd.to_numeric(df_up[as_is_col].astype(str).str.replace(',', ''), errors='coerce')
 
-                    # ★ [핵심] 중복 제거 및 데이터 정제 (Group by Date -> Mean)
-                    # 이를 통해 같은 날짜에 데이터가 여러 개 있어도 평균값 1개만 남김 -> 600k 방지
+                    # ★ [핵심 2] 중복 날짜 합치기 (평균) -> 600k 방지
                     agg_dict = {target_col: 'mean'}
                     if as_is_col: agg_dict[as_is_col] = 'mean'
                     df_up = df_up.groupby("일자", as_index=False).agg(agg_dict)
 
-                    # 3. 단위 보정 (50만 넘으면 MJ -> GJ)
+                    # 단위 보정
                     if df_up[target_col].mean() > 500000:
                         df_up[target_col] = df_up[target_col] * 0.001
                         if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
                         st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
 
-                    # 4. 시각화용 컬럼 생성
+                    # 메인 데이터에서 Bound 가져오기 (시간 제거된 일자 기준 Merge)
+                    view["일자"] = view["일자"].dt.normalize() # 안전장치
+                    view_bounds = view[["일자", "Bound_Upper", "Bound_Lower"]].copy()
+                    
+                    df_up = df_up.merge(view_bounds, on="일자", how="left")
+                    
+                    # Bound 단위 변환
+                    df_up["Bound_Upper(GJ)"] = df_up["Bound_Upper"].apply(mj_to_gj)
+                    df_up["Bound_Lower(GJ)"] = df_up["Bound_Lower"].apply(mj_to_gj)
+
                     df_up["weekday_idx"] = df_up["일자"].dt.weekday
                     df_up["is_weekend"] = df_up["weekday_idx"] >= 5
                     df_up["is_weekday1"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([0, 4]))
@@ -458,15 +469,8 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                         return "평일2(화,수,목)"
                     df_up["구분"] = df_up.apply(_get_label_up, axis=1)
                     
-                    # 5. 메인 데이터에서 Bound 가져오기 (회색 범위)
-                    view_bounds = view[["일자", "Bound_Upper", "Bound_Lower"]].copy()
-                    df_up = df_up.merge(view_bounds, on="일자", how="left")
-                    df_up["Bound_Upper(GJ)"] = df_up["Bound_Upper"].apply(mj_to_gj)
-                    df_up["Bound_Lower(GJ)"] = df_up["Bound_Lower"].apply(mj_to_gj)
-
                     fig_up = go.Figure()
                     
-                    # As-Is
                     if as_is_col:
                         u1 = df_up[df_up["구분"] == "평일1(월,금)"]
                         u2 = df_up[df_up["구분"] == "평일2(화,수,목)"]
@@ -476,7 +480,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                         fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[as_is_col], name="As-Is: 평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
                         fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[as_is_col], name="As-Is: 주말/공휴일", marker_color="#D62728", width=0.8))
                     
-                    # To-Be (Overlay)
                     if as_is_col:
                         mask_changed = (abs(df_up[as_is_col] - df_up[target_col]) > 1)
                         target_view = df_up[mask_changed]
@@ -491,7 +494,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                         width=0.8
                     ))
                     
-                    # [NEW] 회색 범위 라인 추가
+                    # ★ [핵심 3] 회색 범위 라인 추가 (NaN 방지됨)
                     fig_up.add_trace(go.Scatter(x=df_up["일자"].dt.day, y=df_up["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
                     fig_up.add_trace(go.Scatter(x=df_up["일자"].dt.day, y=df_up["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)', hoverinfo='skip'))
 
