@@ -53,16 +53,15 @@ def load_daily_data():
 
     try:
         df_raw = pd.read_excel(excel_path)
-        required = ["일자", "공급량(MJ)", "공급량(M3)", "평균기온(℃)"]
-        for c in required:
-            if c not in df_raw.columns: df_raw[c] = np.nan
-
-        df_raw = df_raw[required].copy()
+        # 필요한 컬럼만 추출 및 이름 통일
+        df_raw = df_raw[["일자", "공급량(MJ)", "공급량(M3)", "평균기온(℃)"]].copy()
+        
         df_raw["일자"] = pd.to_datetime(df_raw["일자"])
         df_raw["연도"] = df_raw["일자"].dt.year
         df_raw["월"] = df_raw["일자"].dt.month
         df_raw["일"] = df_raw["일자"].dt.day
         
+        # 미리 계산 (로직 내에서 다시 계산하지만 호환성 유지)
         df_raw["weekday_idx"] = df_raw["일자"].dt.weekday
         df_raw["nth_dow"] = df_raw.groupby(["연도", "월", "weekday_idx"]).cumcount() + 1
 
@@ -207,10 +206,15 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# 5. 핵심 분석 로직 (Daily)
+# 5. 핵심 분석 로직 (Daily) - [수정됨] 형님 코드와 100% 동일 로직 적용
 # ─────────────────────────────────────────────
 def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_window, apply_trend=False):
-    trend_msg = ""
+    # (주의) apply_trend는 함수 인자로 받지만, 형님 코드에는 해당 로직이 없으므로 여기서는 사용하지 않거나 
+    # 형님 코드의 로직을 그대로 따릅니다. 형님 코드에는 트렌드/이상치 관련 로직이 없으므로
+    # 순수 배분 로직만 구현합니다. 단, 기존 기능(그래프, 바운드) 유지를 위해 
+    # 결과값 계산 후 Bound 등은 덧붙이는 형태로 갑니다.
+
+    trend_msg = "" # 형님 코드 로직엔 없으므로 빈값
     
     cal_df = load_effective_calendar()
     plan_col = _find_plan_col(df_plan)
@@ -230,45 +234,103 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     df_recent = df_recent.dropna(subset=["공급량(MJ)"])
     if df_recent.empty: return None, None, used_years, pd.DataFrame(), ""
 
+    # [형님 로직] 데이터 전처리
     df_recent = df_recent.sort_values(["연도", "일"]).copy()
-    df_recent["weekday_idx"] = df_recent["일자"].dt.weekday
+    df_recent["weekday_idx"] = df_recent["일자"].dt.weekday  # 0=월, 6=일
 
     if cal_df is not None:
         df_recent = df_recent.merge(cal_df, on="일자", how="left")
-        for c in ["공휴일여부", "명절여부"]:
-            df_recent[c] = df_recent[c].fillna(False).astype(bool)
+        if ("공휴일여부" not in df_recent.columns) and ("공휴일여버" in df_recent.columns):
+            df_recent = df_recent.rename(columns={"공휴일여버": "공휴일여부"})
+        if "공휴일여부" not in df_recent.columns:
+            df_recent["공휴일여부"] = False
+
+        df_recent["공휴일여부"] = df_recent["공휴일여부"].fillna(False).astype(bool)
+        df_recent["명절여부"] = df_recent["명절여부"].fillna(False).astype(bool)
     else:
-        df_recent["공휴일여부"] = False; df_recent["명절여부"] = False
+        df_recent["공휴일여부"] = False
+        df_recent["명절여부"] = False
 
     df_recent["is_holiday"] = df_recent["공휴일여부"] | df_recent["명절여부"]
     df_recent["is_weekend"] = (df_recent["weekday_idx"] >= 5) | df_recent["is_holiday"]
-    df_recent["is_weekday1"] = (~df_recent["is_weekend"]) & (df_recent["weekday_idx"].isin([0, 4]))
-    df_recent["is_weekday2"] = (~df_recent["is_weekend"]) & (df_recent["weekday_idx"].isin([1, 2, 3]))
+    df_recent["is_weekday1"] = (~df_recent["is_weekend"]) & (df_recent["weekday_idx"].isin([0, 4]))  # 월,금
+    df_recent["is_weekday2"] = (~df_recent["is_weekend"]) & (df_recent["weekday_idx"].isin([1, 2, 3]))  # 화수목
 
+    # [형님 로직] 비율 계산 (해당 연도 월 합계 대비 비율)
     df_recent["month_total"] = df_recent.groupby("연도")["공급량(MJ)"].transform("sum")
     df_recent["ratio"] = df_recent["공급량(MJ)"] / df_recent["month_total"]
-    df_recent["nth_dow"] = df_recent.groupby(["연도", "weekday_idx"]).cumcount() + 1
 
-    def get_ratio_dict(mask):
-        grp = df_recent[mask].groupby(["weekday_idx", "nth_dow"])["ratio"].mean().to_dict()
-        fallback = df_recent[mask].groupby("weekday_idx")["ratio"].mean().to_dict()
-        return grp, fallback
+    # [형님 로직] N번째 요일 계산
+    df_recent["nth_dow"] = (
+        df_recent.sort_values(["연도", "일"])
+        .groupby(["연도", "weekday_idx"])
+        .cumcount()
+        + 1
+    )
 
-    w_grp, w_fb = get_ratio_dict(df_recent["is_weekend"])
-    w1_grp, w1_fb = get_ratio_dict(df_recent["is_weekday1"])
-    w2_grp, w2_fb = get_ratio_dict(df_recent["is_weekday2"])
+    # [형님 로직] 그룹별 Ratio 집계
+    weekend_mask = df_recent["is_weekend"]
+    w1_mask = df_recent["is_weekday1"]
+    w2_mask = df_recent["is_weekday2"]
 
+    # (요일, N번째)별 평균
+    ratio_weekend_group = (
+        df_recent[weekend_mask].groupby(["weekday_idx", "nth_dow"])["ratio"].mean()
+        if df_recent[weekend_mask].size > 0 else pd.Series(dtype=float)
+    )
+    ratio_w1_group = (
+        df_recent[w1_mask].groupby(["weekday_idx", "nth_dow"])["ratio"].mean()
+        if df_recent[w1_mask].size > 0 else pd.Series(dtype=float)
+    )
+    ratio_w2_group = (
+        df_recent[w2_mask].groupby(["weekday_idx", "nth_dow"])["ratio"].mean()
+        if df_recent[w2_mask].size > 0 else pd.Series(dtype=float)
+    )
+
+    # (요일)별 평균 (Fallback용)
+    ratio_weekend_by_dow = (
+        df_recent[weekend_mask].groupby("weekday_idx")["ratio"].mean()
+        if df_recent[weekend_mask].size > 0 else pd.Series(dtype=float)
+    )
+    ratio_w1_by_dow = (
+        df_recent[w1_mask].groupby("weekday_idx")["ratio"].mean()
+        if df_recent[w1_mask].size > 0 else pd.Series(dtype=float)
+    )
+    ratio_w2_by_dow = (
+        df_recent[w2_mask].groupby("weekday_idx")["ratio"].mean()
+        if df_recent[w2_mask].size > 0 else pd.Series(dtype=float)
+    )
+
+    # Dict 변환
+    ratio_weekend_group_dict = ratio_weekend_group.to_dict()
+    ratio_weekend_by_dow_dict = ratio_weekend_by_dow.to_dict()
+    ratio_w1_group_dict = ratio_w1_group.to_dict()
+    ratio_w1_by_dow_dict = ratio_w1_by_dow.to_dict()
+    ratio_w2_group_dict = ratio_w2_group.to_dict()
+    ratio_w2_by_dow_dict = ratio_w2_by_dow.to_dict()
+
+    # [형님 로직] 타겟 월 생성
     last_day = calendar.monthrange(target_year, target_month)[1]
-    df_target = pd.DataFrame({"일자": pd.date_range(f"{target_year}-{target_month:02d}-01", periods=last_day)})
-    df_target["연"] = target_year; df_target["월"] = target_month; df_target["일"] = df_target["일자"].dt.day
+    date_range = pd.date_range(f"{target_year}-{target_month:02d}-01", periods=last_day, freq="D")
+
+    df_target = pd.DataFrame({"일자": date_range})
+    df_target["연"] = target_year
+    df_target["월"] = target_month
+    df_target["일"] = df_target["일자"].dt.day
     df_target["weekday_idx"] = df_target["일자"].dt.weekday
-    
+
     if cal_df is not None:
         df_target = df_target.merge(cal_df, on="일자", how="left")
-        for c in ["공휴일여부", "명절여부"]:
-            df_target[c] = df_target[c].fillna(False).astype(bool)
+        if ("공휴일여부" not in df_target.columns) and ("공휴일여버" in df_target.columns):
+            df_target = df_target.rename(columns={"공휴일여버": "공휴일여부"})
+        if "공휴일여부" not in df_target.columns:
+            df_target["공휴일여부"] = False
+
+        df_target["공휴일여부"] = df_target["공휴일여부"].fillna(False).astype(bool)
+        df_target["명절여부"] = df_target["명절여부"].fillna(False).astype(bool)
     else:
-        df_target["공휴일여부"] = False; df_target["명절여부"] = False
+        df_target["공휴일여부"] = False
+        df_target["명절여부"] = False
 
     df_target["is_holiday"] = df_target["공휴일여부"] | df_target["명절여부"]
     df_target["is_weekend"] = (df_target["weekday_idx"] >= 5) | df_target["is_holiday"]
@@ -276,57 +338,78 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     df_target["is_weekday2"] = (~df_target["is_weekend"]) & (df_target["weekday_idx"].isin([1, 2, 3]))
 
     weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
-    df_target["요일"] = df_target["weekday_idx"].map(lambda x: weekday_names[x])
-    df_target["nth_dow"] = df_target.groupby("weekday_idx").cumcount() + 1
+    df_target["요일"] = df_target["weekday_idx"].map(lambda i: weekday_names[i])
 
-    def _get_label(r):
-        if r["is_weekend"]: return "주말/공휴일"
-        if r["is_weekday1"]: return "평일1(월,금)"
+    df_target["nth_dow"] = df_target.sort_values("일").groupby("weekday_idx").cumcount() + 1
+
+    def _label(row):
+        if row["is_weekend"]: return "주말/공휴일"
+        if row["is_weekday1"]: return "평일1(월,금)"
         return "평일2(화,수,목)"
-    df_target["구분"] = df_target.apply(_get_label, axis=1)
+    df_target["구분"] = df_target.apply(_label, axis=1)
 
-    def _apply_ratio(r):
-        k = (r["weekday_idx"], r["nth_dow"]); wd = r["weekday_idx"]
-        if r["is_weekend"]: return w_grp.get(k, w_fb.get(wd, np.nan))
-        if r["is_weekday1"]: return w1_grp.get(k, w1_fb.get(wd, np.nan))
-        return w2_grp.get(k, w2_fb.get(wd, np.nan))
+    # [형님 로직] Ratio 적용
+    def _pick_ratio(row):
+        dow = int(row["weekday_idx"])
+        nth = int(row["nth_dow"])
+        key = (dow, nth)
 
-    df_target["raw"] = df_target.apply(_apply_ratio, axis=1).astype(float)
-    overall_mean = df_target["raw"].mean()
-    df_target["raw"] = df_target["raw"].fillna(overall_mean if pd.notna(overall_mean) else 1.0)
-    
-    if apply_trend:
-        days = len(df_target)
-        if days > 1:
-            if target_month in [10, 11, 12]:
-                trend_factors = np.linspace(0.95, 1.05, days)
-                trend_msg = f"📈 **{target_month}월 추세 적용**: 월초 대비 월말 기온 하강으로 공급량 **약 5% 증가** 패턴을 적용했습니다."
-            elif target_month in [1, 2, 3, 4]:
-                trend_factors = np.linspace(1.05, 0.95, days)
-                trend_msg = f"📉 **{target_month}월 추세 적용**: 월초 대비 월말 기온 상승으로 공급량 **약 5% 감소** 패턴을 적용했습니다."
-            else:
-                trend_factors = np.ones(days)
-                trend_msg = f"⚖️ **{target_month}월**: 뚜렷한 계절적 증감 추세가 없는 구간입니다."
+        if bool(row["is_weekend"]):
+            v = ratio_weekend_group_dict.get(key, None)
+            if v is None or pd.isna(v):
+                v = ratio_weekend_by_dow_dict.get(dow, None)
+            return v
 
-            df_target["raw"] = df_target["raw"] * trend_factors
+        if bool(row["is_weekday1"]):
+            v = ratio_w1_group_dict.get(key, None)
+            if v is None or pd.isna(v):
+                v = ratio_w1_by_dow_dict.get(dow, None)
+            return v
 
+        v = ratio_w2_group_dict.get(key, None)
+        if v is None or pd.isna(v):
+            v = ratio_w2_by_dow_dict.get(dow, None)
+        return v
+
+    df_target["raw"] = df_target.apply(_pick_ratio, axis=1).astype("float64")
+
+    # 결측치 처리 (전체 평균)
+    overall_mean = df_target["raw"].dropna().mean() if df_target["raw"].notna().any() else np.nan
+    for cat in ["주말/공휴일", "평일1(월,금)", "평일2(화,수,목)"]:
+        mask = df_target["구분"] == cat
+        if mask.any():
+            m = df_target.loc[mask, "raw"].dropna().mean()
+            if pd.isna(m): m = overall_mean
+            df_target.loc[mask, "raw"] = df_target.loc[mask, "raw"].fillna(m)
+
+    if df_target["raw"].isna().all(): df_target["raw"] = 1.0
+
+    # 정규화
     raw_sum = df_target["raw"].sum()
-    df_target["일별비율"] = df_target["raw"] / raw_sum
+    df_target["일별비율"] = (df_target["raw"] / raw_sum) if raw_sum > 0 else (1.0 / last_day)
 
+    # [형님 로직] 통계치 계산
+    month_total_all = df_recent["공급량(MJ)"].sum()
+    df_target["최근N년_총공급량(MJ)"] = df_target["일별비율"] * month_total_all
+    df_target["최근N년_평균공급량(MJ)"] = df_target["최근N년_총공급량(MJ)"] / len(used_years)
+
+    # 계획 적용
     row_plan = df_plan[(df_plan["연"] == target_year) & (df_plan["월"] == target_month)]
     plan_total = float(row_plan[plan_col].iloc[0]) if not row_plan.empty else 0
+    
     df_target["예상공급량(MJ)"] = (df_target["일별비율"] * plan_total).round(0)
-
+    
+    # [기존 기능 유지] 이상치 탐지 (Bound Calculation) - 형님 코드엔 없지만 그래프를 위해 추가
     df_target["WeekNum"] = df_target["일자"].dt.isocalendar().week
     df_target["Group_Mean"] = df_target.groupby(["WeekNum", "is_weekend"])["예상공급량(MJ)"].transform("mean")
     df_target["Bound_Upper"] = df_target["Group_Mean"] * 1.10
     df_target["Bound_Lower"] = df_target["Group_Mean"] * 0.90
     df_target["is_outlier"] = (df_target["예상공급량(MJ)"] > df_target["Bound_Upper"]) | (df_target["예상공급량(MJ)"] < df_target["Bound_Lower"])
-    
-    df_target["최근N년_평균공급량(MJ)"] = 0
-    df_target["최근N년_총공급량(MJ)"] = 0
 
+    # 결과 정리
     df_mat = df_recent.pivot_table(index="일", columns="연도", values="공급량(MJ)", aggfunc="sum").sort_index(axis=1)
+    
+    # 디버그용 (필요시)
     df_debug = df_target.copy()
 
     return df_target, df_mat, used_years, df_debug, trend_msg
@@ -359,7 +442,6 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
 def tab_daily_plan(df_daily: pd.DataFrame):
     st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
 
-    # [NEW] 파일 업로드 (xlsx, csv 모두 허용)
     uploaded_file = st.sidebar.file_uploader("📂 비교용 엑셀/CSV 파일 업로드", type=["xlsx", "csv"])
 
     df_plan = load_monthly_plan()
@@ -405,10 +487,9 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     chart_placeholder = st.empty()
 
-    # ★ [수정] 파일 처리: 무적 로더 (BytesIO + 다중 인코딩 시도)
+    # ★ 파일 처리: 무적 로더(Excel/CSV) + Normalize + Groupby + Merge
     if uploaded_file is not None:
         try:
-            # 1. 파일 내용을 바이트로 읽기 (한 번만)
             file_bytes = uploaded_file.getvalue()
             df_up = None
             
@@ -442,26 +523,21 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             if df_up is None:
                 st.error("❌ 파일을 읽을 수 없습니다. (Excel/CSV 포맷 확인 요망)")
             else:
-                # 컬럼 이름 앞뒤 공백 제거
                 df_up.columns = df_up.columns.str.strip()
                 
                 target_col = None
                 as_is_col = None
                 
-                # 컬럼 찾기 (유연하게)
                 for c in df_up.columns:
                     if "To-Be" in c and "최종" in c: target_col = c
                     if "As-Is" in c: as_is_col = c
                 
                 if target_col and "일자" in df_up.columns:
-                    # 날짜 변환
                     df_up["일자"] = pd.to_datetime(df_up["일자"], errors='coerce')
                     df_up = df_up.dropna(subset=["일자"])
                     
-                    # ★ [핵심 1] 시간 제거 (Normalize)
                     df_up["일자"] = df_up["일자"].dt.normalize()
                     
-                    # 날짜 필터링
                     df_up = df_up[
                         (df_up["일자"].dt.year == target_year) & 
                         (df_up["일자"].dt.month == target_month)
@@ -470,24 +546,20 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     if df_up.empty:
                         st.warning(f"⚠️ 업로드된 파일에 {target_year}년 {target_month}월 데이터가 없습니다.")
                     else:
-                        # 강제 형변환 (콤마 제거)
                         if df_up[target_col].dtype == object:
                             df_up[target_col] = pd.to_numeric(df_up[target_col].astype(str).str.replace(',', ''), errors='coerce')
                         if as_is_col and df_up[as_is_col].dtype == object:
                             df_up[as_is_col] = pd.to_numeric(df_up[as_is_col].astype(str).str.replace(',', ''), errors='coerce')
 
-                        # ★ [핵심 2] 중복 날짜 합치기 (600k 방지)
                         agg_dict = {target_col: 'mean'}
                         if as_is_col: agg_dict[as_is_col] = 'mean'
                         df_up = df_up.groupby("일자", as_index=False).agg(agg_dict)
 
-                        # 단위 보정 (200만 이상 -> GJ 변환) - 기준 상향 조정
                         if df_up[target_col].mean() > 2000000:
                             df_up[target_col] = df_up[target_col] * 0.001
                             if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
                             st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
 
-                        # ★ [핵심 3] 메인 데이터와 Merge (회색선/As-Is 보완)
                         view_base = view[["일자", "예상공급량(GJ)", "Bound_Upper", "Bound_Lower"]].copy()
                         view_base["일자"] = view_base["일자"].dt.normalize() 
                         
@@ -503,7 +575,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                         df_merged["Bound_Upper(GJ)"] = df_merged["Bound_Upper"].apply(mj_to_gj)
                         df_merged["Bound_Lower(GJ)"] = df_merged["Bound_Lower"].apply(mj_to_gj)
 
-                        # 시각화용 컬럼 생성
                         df_merged["weekday_idx"] = df_merged["일자"].dt.weekday
                         df_merged["is_weekend"] = df_merged["weekday_idx"] >= 5
                         df_merged["is_weekday1"] = (~df_merged["is_weekend"]) & (df_merged["weekday_idx"].isin([0, 4]))
@@ -517,7 +588,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                         
                         fig_up = go.Figure()
                         
-                        # As-Is
                         u1 = df_merged[df_merged["구분"] == "평일1(월,금)"]
                         u2 = df_merged[df_merged["구분"] == "평일2(화,수,목)"]
                         ue = df_merged[df_merged["구분"] == "주말/공휴일"]
@@ -526,7 +596,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                         fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[final_as_is], name="As-Is: 평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
                         fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[final_as_is], name="As-Is: 주말/공휴일", marker_color="#D62728", width=0.8))
                         
-                        # To-Be (Overlay)
                         if target_col in df_merged.columns:
                             mask_changed = (abs(df_merged[final_as_is] - df_merged[target_col]) > 1)
                             target_view = df_merged[mask_changed]
@@ -539,7 +608,6 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                                 width=0.8
                             ))
                         
-                        # Bound Line (회색 범위)
                         fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
                         fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)', hoverinfo='skip'))
 
