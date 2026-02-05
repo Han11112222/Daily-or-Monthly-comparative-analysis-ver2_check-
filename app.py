@@ -404,7 +404,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     chart_placeholder = st.empty()
 
-    # ★ [수정] 업로드 파일: 시간 제거(Normalize) + 중복 제거(Groupby Mean) + 회색 범위
+    # ★ [수정] 업로드 파일: 날짜 필터링 + 단위 보정 + 중복 제거 + 시스템 As-Is 연동
     if uploaded_file is not None:
         try:
             df_up = pd.read_excel(uploaded_file)
@@ -419,14 +419,12 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             if target_col and "일자" in df_up.columns:
                 df_up["일자"] = pd.to_datetime(df_up["일자"])
                 
-                # ★ [핵심 1] 시간을 00:00:00으로 통일 (Normalize)
+                # ★ [핵심 1] 시간을 00:00:00으로 통일 (Normalize)하여 1,2일 외 불일치 해결
                 df_up["일자"] = df_up["일자"].dt.normalize()
                 
-                # 날짜 필터링
-                df_up = df_up[
-                    (df_up["일자"].dt.year == target_year) & 
-                    (df_up["일자"].dt.month == target_month)
-                ].copy()
+                # 날짜 필터링 (메인 그래프의 1일~말일 범위만 남김 -> 29일/30일 제거)
+                view_dates = set(view["일자"].dt.date)
+                df_up = df_up[df_up["일자"].dt.date.isin(view_dates)].copy()
                 
                 if df_up.empty:
                     st.warning(f"⚠️ 업로드된 파일에 {target_year}년 {target_month}월 데이터가 없습니다.")
@@ -448,55 +446,66 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                         if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
                         st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
 
-                    # 메인 데이터에서 Bound 가져오기 (시간 제거된 일자 기준 Merge)
-                    view["일자"] = view["일자"].dt.normalize() # 안전장치
-                    view_bounds = view[["일자", "Bound_Upper", "Bound_Lower"]].copy()
+                    # ★ [핵심 3] As-Is 누락 시 메인 데이터에서 가져오기 (회색 현상 해결)
+                    # 메인 데이터(view)와 날짜 기준 병합 (Left Join)
+                    view_base = view[["일자", "예상공급량(GJ)", "Bound_Upper", "Bound_Lower"]].copy()
+                    view_base["일자"] = view_base["일자"].dt.normalize() # 안전장치
                     
-                    df_up = df_up.merge(view_bounds, on="일자", how="left")
+                    df_merged = view_base.merge(df_up, on="일자", how="left")
                     
-                    # Bound 단위 변환
-                    df_up["Bound_Upper(GJ)"] = df_up["Bound_Upper"].apply(mj_to_gj)
-                    df_up["Bound_Lower(GJ)"] = df_up["Bound_Lower"].apply(mj_to_gj)
+                    # 업로드 파일에 As-Is가 없거나 0이면 메인 데이터 사용
+                    final_as_is = "Final_As_Is"
+                    if as_is_col:
+                        df_merged[final_as_is] = df_merged[as_is_col].fillna(df_merged["예상공급량(GJ)"])
+                        # 0인 경우도 메인 값으로 대체
+                        df_merged.loc[df_merged[final_as_is] == 0, final_as_is] = df_merged["예상공급량(GJ)"]
+                    else:
+                        df_merged[final_as_is] = df_merged["예상공급량(GJ)"]
 
-                    df_up["weekday_idx"] = df_up["일자"].dt.weekday
-                    df_up["is_weekend"] = df_up["weekday_idx"] >= 5
-                    df_up["is_weekday1"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([0, 4]))
-                    df_up["is_weekday2"] = (~df_up["is_weekend"]) & (df_up["weekday_idx"].isin([1, 2, 3]))
+                    # Bound 단위 변환
+                    df_merged["Bound_Upper(GJ)"] = df_merged["Bound_Upper"].apply(mj_to_gj)
+                    df_merged["Bound_Lower(GJ)"] = df_merged["Bound_Lower"].apply(mj_to_gj)
+
+                    # 시각화용 컬럼 생성
+                    df_merged["weekday_idx"] = df_merged["일자"].dt.weekday
+                    df_merged["is_weekend"] = df_merged["weekday_idx"] >= 5
+                    df_merged["is_weekday1"] = (~df_merged["is_weekend"]) & (df_merged["weekday_idx"].isin([0, 4]))
+                    df_merged["is_weekday2"] = (~df_merged["is_weekend"]) & (df_merged["weekday_idx"].isin([1, 2, 3]))
                     
                     def _get_label_up(r):
                         if r["is_weekend"]: return "주말/공휴일"
                         if r["is_weekday1"]: return "평일1(월,금)"
                         return "평일2(화,수,목)"
-                    df_up["구분"] = df_up.apply(_get_label_up, axis=1)
+                    df_merged["구분"] = df_merged.apply(_get_label_up, axis=1)
                     
                     fig_up = go.Figure()
                     
-                    if as_is_col:
-                        u1 = df_up[df_up["구분"] == "평일1(월,금)"]
-                        u2 = df_up[df_up["구분"] == "평일2(화,수,목)"]
-                        ue = df_up[df_up["구분"] == "주말/공휴일"]
+                    # As-Is (System + Upload Fallback)
+                    u1 = df_merged[df_merged["구분"] == "평일1(월,금)"]
+                    u2 = df_merged[df_merged["구분"] == "평일2(화,수,목)"]
+                    ue = df_merged[df_merged["구분"] == "주말/공휴일"]
+                    
+                    fig_up.add_trace(go.Bar(x=u1["일자"].dt.day, y=u1[final_as_is], name="As-Is: 평일1(월,금)", marker_color="#1F77B4", width=0.8))
+                    fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[final_as_is], name="As-Is: 평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
+                    fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[final_as_is], name="As-Is: 주말/공휴일", marker_color="#D62728", width=0.8))
+                    
+                    # To-Be (Overlay)
+                    if target_col in df_merged.columns:
+                        # 차이가 있는 부분만 그리기
+                        mask_changed = (abs(df_merged[final_as_is] - df_merged[target_col]) > 1)
+                        target_view = df_merged[mask_changed]
                         
-                        fig_up.add_trace(go.Bar(x=u1["일자"].dt.day, y=u1[as_is_col], name="As-Is: 평일1(월,금)", marker_color="#1F77B4", width=0.8))
-                        fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[as_is_col], name="As-Is: 평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
-                        fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[as_is_col], name="As-Is: 주말/공휴일", marker_color="#D62728", width=0.8))
+                        fig_up.add_trace(go.Bar(
+                            x=target_view["일자"].dt.day, 
+                            y=target_view[target_col],
+                            marker_color="rgba(100, 100, 100, 0.6)", 
+                            name="To-Be(보정)",
+                            width=0.8
+                        ))
                     
-                    if as_is_col:
-                        mask_changed = (abs(df_up[as_is_col] - df_up[target_col]) > 1)
-                        target_view = df_up[mask_changed]
-                    else:
-                        target_view = df_up
-
-                    fig_up.add_trace(go.Bar(
-                        x=target_view["일자"].dt.day, 
-                        y=target_view[target_col],
-                        marker_color="rgba(100, 100, 100, 0.6)", 
-                        name="To-Be(보정)",
-                        width=0.8
-                    ))
-                    
-                    # ★ [핵심 3] 회색 범위 라인 추가 (NaN 방지됨)
-                    fig_up.add_trace(go.Scatter(x=df_up["일자"].dt.day, y=df_up["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
-                    fig_up.add_trace(go.Scatter(x=df_up["일자"].dt.day, y=df_up["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)', hoverinfo='skip'))
+                    # ★ [핵심 4] 회색 범위 라인 추가 (메인과 동일)
+                    fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
+                    fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)', hoverinfo='skip'))
 
                     fig_up.update_layout(
                         title=f"📂 업로드 데이터 ({target_year}년 {target_month}월): {uploaded_file.name}",
