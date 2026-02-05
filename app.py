@@ -53,16 +53,17 @@ def load_daily_data():
 
     try:
         df_raw = pd.read_excel(excel_path)
+        # 필요한 컬럼만 추출 및 이름 통일
         required = ["일자", "공급량(MJ)", "공급량(M3)", "평균기온(℃)"]
-        # 필요한 컬럼만 존재하면 추출
         cols = [c for c in required if c in df_raw.columns]
         df_raw = df_raw[cols].copy()
-
+        
         df_raw["일자"] = pd.to_datetime(df_raw["일자"])
         df_raw["연도"] = df_raw["일자"].dt.year
         df_raw["월"] = df_raw["일자"].dt.month
         df_raw["일"] = df_raw["일자"].dt.day
         
+        # 미리 계산
         df_raw["weekday_idx"] = df_raw["일자"].dt.weekday
         df_raw["nth_dow"] = df_raw.groupby(["연도", "월", "weekday_idx"]).cumcount() + 1
 
@@ -207,7 +208,7 @@ def _make_display_table_gj_m3(df_mj: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# 5. 핵심 분석 로직 (Daily) - [형님 요청 로직]
+# 5. 핵심 분석 로직 (Daily) - [형님 코드 로직 100% 반영]
 # ─────────────────────────────────────────────
 def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_window, apply_trend=False):
     trend_msg = ""
@@ -230,7 +231,6 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     df_recent = df_recent.dropna(subset=["공급량(MJ)"])
     if df_recent.empty: return None, None, used_years, pd.DataFrame(), ""
 
-    # [형님 로직] 데이터 전처리
     df_recent = df_recent.sort_values(["연도", "일"]).copy()
     df_recent["weekday_idx"] = df_recent["일자"].dt.weekday
 
@@ -384,7 +384,7 @@ def make_daily_plan_table(df_daily, df_plan, target_year, target_month, recent_w
     
     df_target["예상공급량(MJ)"] = (df_target["일별비율"] * plan_total).round(0)
     
-    # [그래프용 Bound 추가]
+    # [★ 중요] 2번 그래프를 위한 Bound 계산 추가 (형님 로직에는 없지만 시각화를 위해 계산)
     df_target["WeekNum"] = df_target["일자"].dt.isocalendar().week
     df_target["Group_Mean"] = df_target.groupby(["WeekNum", "is_weekend"])["예상공급량(MJ)"].transform("mean")
     df_target["Bound_Upper"] = df_target["Group_Mean"] * 1.10
@@ -469,41 +469,24 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     chart_placeholder = st.empty()
 
-    # ★ [수정] 파일 처리: 무적 로더 + 데이터 정제 (에러 원천 봉쇄)
+    # ★ 파일 처리 및 2번 그래프 그리기 (에러 수정됨)
     if uploaded_file is not None:
         try:
             file_bytes = uploaded_file.getvalue()
             df_up = None
             
             # (1) 엑셀 시도
-            try:
-                df_up = pd.read_excel(BytesIO(file_bytes))
-            except:
-                pass
+            try: df_up = pd.read_excel(BytesIO(file_bytes))
+            except: pass
             
-            # (2) CSV (utf-8) 시도
+            # (2) CSV 시도 (인코딩별)
             if df_up is None:
-                try:
-                    df_up = pd.read_csv(BytesIO(file_bytes), encoding='utf-8')
-                except:
-                    pass
-            
-            # (3) CSV (cp949) 시도
-            if df_up is None:
-                try:
-                    df_up = pd.read_csv(BytesIO(file_bytes), encoding='cp949')
-                except:
-                    pass
-            
-            # (4) CSV (euc-kr) 시도
-            if df_up is None:
-                try:
-                    df_up = pd.read_csv(BytesIO(file_bytes), encoding='euc-kr')
-                except:
-                    pass
+                for enc in ['utf-8', 'cp949', 'euc-kr']:
+                    try: df_up = pd.read_csv(BytesIO(file_bytes), encoding=enc); break
+                    except: pass
 
             if df_up is None:
-                st.error("❌ 파일 형식을 읽을 수 없습니다. (Excel/CSV 포맷 확인)")
+                st.error("❌ 파일을 읽을 수 없습니다. (Excel/CSV 포맷 확인 요망)")
             else:
                 df_up.columns = df_up.columns.str.strip()
                 
@@ -517,9 +500,8 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 if target_col and "일자" in df_up.columns:
                     df_up["일자"] = pd.to_datetime(df_up["일자"], errors='coerce')
                     df_up = df_up.dropna(subset=["일자"])
-                    
-                    # ★ [핵심] 시간 제거 및 날짜 필터링
                     df_up["일자"] = df_up["일자"].dt.normalize()
+                    
                     df_up = df_up[
                         (df_up["일자"].dt.year == target_year) & 
                         (df_up["일자"].dt.month == target_month)
@@ -528,26 +510,23 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     if df_up.empty:
                         st.warning(f"⚠️ 업로드된 파일에 {target_year}년 {target_month}월 데이터가 없습니다.")
                     else:
-                        # 강제 형변환
                         if df_up[target_col].dtype == object:
                             df_up[target_col] = pd.to_numeric(df_up[target_col].astype(str).str.replace(',', ''), errors='coerce')
                         if as_is_col and df_up[as_is_col].dtype == object:
                             df_up[as_is_col] = pd.to_numeric(df_up[as_is_col].astype(str).str.replace(',', ''), errors='coerce')
 
-                        # ★ [핵심] 중복 제거 (평균) -> 600k 방지
                         agg_dict = {target_col: 'mean'}
                         if as_is_col: agg_dict[as_is_col] = 'mean'
                         df_up = df_up.groupby("일자", as_index=False).agg(agg_dict)
 
-                        # 단위 보정 (200만 이상 -> GJ 변환)
                         if df_up[target_col].mean() > 2000000:
                             df_up[target_col] = df_up[target_col] * 0.001
                             if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
                             st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
 
-                        # 메인 데이터와 병합 (회색선 확보)
+                        # [핵심] view(메인 데이터)에는 Bound가 있으므로 안전하게 병합
                         view_base = view[["일자", "예상공급량(GJ)", "Bound_Upper", "Bound_Lower"]].copy()
-                        view_base["일자"] = view_base["일자"].dt.normalize()
+                        view_base["일자"] = view_base["일자"].dt.normalize() 
                         
                         df_merged = view_base.merge(df_up, on="일자", how="left")
                         
