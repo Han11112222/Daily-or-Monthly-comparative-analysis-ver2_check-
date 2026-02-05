@@ -359,7 +359,6 @@ def _build_year_daily_plan(df_daily, df_plan, target_year, recent_window):
 def tab_daily_plan(df_daily: pd.DataFrame):
     st.subheader("📅 Daily 공급량 분석 — 최근 N년 패턴 기반 일별 계획")
 
-    # [NEW] 파일 업로드 (xlsx, csv 모두 허용)
     uploaded_file = st.sidebar.file_uploader("📂 비교용 엑셀/CSV 파일 업로드", type=["xlsx", "csv"])
 
     df_plan = load_monthly_plan()
@@ -405,12 +404,16 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     chart_placeholder = st.empty()
 
-    # ★ [수정] 파일 처리: 만능 리더기 + Normalize + Groupby + Merge
+    # ★ [수정] 파일 처리: 만능 리더기(Excel/CSV) + Normalize + Groupby + Merge
     if uploaded_file is not None:
         try:
-            # 1. 파일 확장자에 따라 읽기 방식 분기
+            # 1. 파일 확장자 및 인코딩 대응
             if uploaded_file.name.endswith('.csv'):
-                df_up = pd.read_csv(uploaded_file)
+                try:
+                    df_up = pd.read_csv(uploaded_file, encoding='utf-8')
+                except UnicodeDecodeError:
+                    uploaded_file.seek(0)
+                    df_up = pd.read_csv(uploaded_file, encoding='cp949') # 한글 대응
             else:
                 df_up = pd.read_excel(uploaded_file)
             
@@ -436,24 +439,24 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 if df_up.empty:
                     st.warning(f"⚠️ 업로드된 파일에 {target_year}년 {target_month}월 데이터가 없습니다.")
                 else:
-                    # 강제 형변환
+                    # 강제 형변환 (콤마 제거)
                     if df_up[target_col].dtype == object:
                         df_up[target_col] = pd.to_numeric(df_up[target_col].astype(str).str.replace(',', ''), errors='coerce')
                     if as_is_col and df_up[as_is_col].dtype == object:
                         df_up[as_is_col] = pd.to_numeric(df_up[as_is_col].astype(str).str.replace(',', ''), errors='coerce')
 
-                    # ★ [핵심 2] Groupby로 중복 날짜 합치기 (600k 방지)
+                    # ★ [핵심 2] 중복 날짜 합치기 (600k 방지)
                     agg_dict = {target_col: 'mean'}
                     if as_is_col: agg_dict[as_is_col] = 'mean'
                     df_up = df_up.groupby("일자", as_index=False).agg(agg_dict)
 
-                    # 단위 보정
+                    # 단위 보정 (50만 이상 -> GJ 변환)
                     if df_up[target_col].mean() > 500000:
                         df_up[target_col] = df_up[target_col] * 0.001
                         if as_is_col: df_up[as_is_col] = df_up[as_is_col] * 0.001
                         st.toast("💡 업로드된 파일의 단위를 MJ → GJ로 자동 변환했습니다.")
 
-                    # ★ [핵심 3] 메인 데이터와 Merge (회색선 및 As-Is 보완)
+                    # ★ [핵심 3] 메인 데이터와 Merge (회색선/As-Is 보완)
                     view_base = view[["일자", "예상공급량(GJ)", "Bound_Upper", "Bound_Lower"]].copy()
                     view_base["일자"] = view_base["일자"].dt.normalize() 
                     
@@ -462,14 +465,15 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                     final_as_is = "Final_As_Is"
                     if as_is_col:
                         df_merged[final_as_is] = df_merged[as_is_col].fillna(df_merged["예상공급량(GJ)"])
-                        # 0인 경우도 메인 값으로 대체
                         df_merged.loc[df_merged[final_as_is] == 0, final_as_is] = df_merged["예상공급량(GJ)"]
                     else:
                         df_merged[final_as_is] = df_merged["예상공급량(GJ)"]
 
+                    # Bound 단위 변환 (MJ -> GJ)
                     df_merged["Bound_Upper(GJ)"] = df_merged["Bound_Upper"].apply(mj_to_gj)
                     df_merged["Bound_Lower(GJ)"] = df_merged["Bound_Lower"].apply(mj_to_gj)
 
+                    # 시각화용 컬럼 생성
                     df_merged["weekday_idx"] = df_merged["일자"].dt.weekday
                     df_merged["is_weekend"] = df_merged["weekday_idx"] >= 5
                     df_merged["is_weekday1"] = (~df_merged["is_weekend"]) & (df_merged["weekday_idx"].isin([0, 4]))
@@ -505,7 +509,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                             width=0.8
                         ))
                     
-                    # Bound Line
+                    # Bound Line (회색 범위)
                     fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
                     fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)', hoverinfo='skip'))
 
