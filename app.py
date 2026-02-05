@@ -404,7 +404,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     
     chart_placeholder = st.empty()
 
-    # ★ [수정] 업로드 파일: 시간 제거(Normalize) + 중복 제거 + 회색 범위
+    # ★ [수정] 업로드 파일: 시간 제거(Normalize) + 중복 제거(Groupby Mean) + 회색 범위
     if uploaded_file is not None:
         try:
             df_up = pd.read_excel(uploaded_file)
@@ -419,7 +419,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
             if target_col and "일자" in df_up.columns:
                 df_up["일자"] = pd.to_datetime(df_up["일자"])
                 
-                # ★ [핵심 1] 시간을 00:00:00으로 통일 (Normalize)하여 날짜 불일치 제거
+                # ★ [핵심 1] 시간을 00:00:00으로 통일 (Normalize)
                 df_up["일자"] = df_up["일자"].dt.normalize()
                 
                 # 날짜 필터링
