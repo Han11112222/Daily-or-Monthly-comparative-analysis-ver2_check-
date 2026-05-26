@@ -804,7 +804,7 @@ def tab_daily_plan(df_daily: pd.DataFrame):
 
     st.markdown("#### 🧊 4. 최근 N년 일별 실적 매트릭스")
     if df_mat is not None:
-        df_mat_gj = df_mat.applymap(mj_to_gj)
+        df_mat_gj = df_mat.map(mj_to_gj)
         fig_hm = go.Figure(
             data=go.Heatmap(
                 z=df_mat_gj.values,
