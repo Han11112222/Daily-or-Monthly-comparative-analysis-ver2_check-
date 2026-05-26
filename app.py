@@ -47,12 +47,13 @@ if 'rec_rate' not in st.session_state: st.session_state['rec_rate'] = 0.0
 # ─────────────────────────────────────────────
 @st.cache_data
 def load_daily_data():
-    excel_path = Path(__file__).parent / "공급량(일일실적).xlsx"
-    if not excel_path.exists():
-        return pd.DataFrame(), pd.DataFrame()
-
+    # [수정됨] 구글 스프레드시트 CSV 내보내기 링크 적용
+    sheet_id = "13HrIz6OytYDykXeXzXJ02I6XbaKin1YaKBoO2kBd6Bs"
+    gid = "0"
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    
     try:
-        df_raw = pd.read_excel(excel_path)
+        df_raw = pd.read_csv(csv_url)
         # 필요한 컬럼만 추출 및 이름 통일
         required = ["일자", "공급량(MJ)", "공급량(M3)", "평균기온(℃)"]
         cols = [c for c in required if c in df_raw.columns]
@@ -70,7 +71,8 @@ def load_daily_data():
         df_temp_all = df_raw.dropna(subset=["평균기온(℃)"]).copy() if "평균기온(℃)" in df_raw.columns else df_raw
         df_model = df_raw.dropna(subset=["공급량(MJ)"]).copy() if "공급량(MJ)" in df_raw.columns else df_raw
         return df_model, df_temp_all
-    except:
+    except Exception as e:
+        st.error(f"구글 시트 데이터를 불러오는 중 에러가 발생했습니다: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 @st.cache_data
