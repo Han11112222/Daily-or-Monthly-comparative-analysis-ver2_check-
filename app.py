@@ -94,7 +94,8 @@ def load_effective_calendar() -> pd.DataFrame | None:
         df["일자"] = pd.to_datetime(df["날짜"].astype(str), format="%Y%m%d", errors="coerce")
         for col in ["공휴일여부", "명절여부"]:
             if col not in df.columns: df[col] = False
-            df[col] = df[col].fillna(False).astype(bool)
+            if df[col].dtype != bool:
+                df[col] = df[col].fillna(False).astype(bool)
         return df[["일자", "공휴일여부", "명절여부"]].copy()
     except: return None
 
@@ -565,9 +566,9 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                         u2 = df_merged[df_merged["구분"] == "평일2(화,수,목)"]
                         ue = df_merged[df_merged["구분"] == "주말/공휴일"]
                         
-                        fig_up.add_trace(go.Bar(x=u1["일자"].dt.day, y=u1[final_as_is], name="As-Is: 평일1(월,금)", marker_color="#1F77B4", width=0.8))
-                        fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[final_as_is], name="As-Is: 평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
-                        fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[final_as_is], name="As-Is: 주말/공휴일", marker_color="#D62728", width=0.8))
+                        fig_up.add_trace(go.Bar(x=u1["일자"].dt.day, y=u1[final_as_is], name="As-Is: 평일1(월,금)", marker_color="#1F77B4", width=0.8, hovertemplate="%{x}일: %{y:,.0f} GJ<extra>%{name}</extra>"))
+                        fig_up.add_trace(go.Bar(x=u2["일자"].dt.day, y=u2[final_as_is], name="As-Is: 평일2(화,수,목)", marker_color="#87CEFA", width=0.8, hovertemplate="%{x}일: %{y:,.0f} GJ<extra>%{name}</extra>"))
+                        fig_up.add_trace(go.Bar(x=ue["일자"].dt.day, y=ue[final_as_is], name="As-Is: 주말/공휴일", marker_color="#D62728", width=0.8, hovertemplate="%{x}일: %{y:,.0f} GJ<extra>%{name}</extra>"))
                         
                         if target_col in df_merged.columns:
                             mask_changed = (abs(df_merged[final_as_is] - df_merged[target_col]) > 1)
@@ -581,10 +582,11 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                                 marker_line_color="rgba(60, 60, 60, 1.0)",
                                 marker_line_width=2,
                                 name="To-Be(보정)",
-                                width=0.8
+                                width=0.8,
+                                hovertemplate="%{x}일: %{y:,.0f} GJ<extra>%{name}</extra>"
                             ))
                         
-                        fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
+                        fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
                         fig_up.add_trace(go.Scatter(x=df_merged["일자"].dt.day, y=df_merged["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)', hoverinfo='skip'))
 
                         fig_up.update_layout(
@@ -730,9 +732,9 @@ def tab_daily_plan(df_daily: pd.DataFrame):
     w2 = view[view["구분"] == "평일2(화,수,목)"].copy()
     we = view[view["구분"] == "주말/공휴일"].copy()
 
-    fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월,금)", marker_color="#1F77B4", width=0.8))
-    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화,수,목)", marker_color="#87CEFA", width=0.8))
-    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#D62728", width=0.8))
+    fig.add_trace(go.Bar(x=w1["일"], y=w1["예상공급량(GJ)"], name="평일1(월,금)", marker_color="#1F77B4", width=0.8, hovertemplate="%{x}일: %{y:,.0f} GJ<extra>%{name}</extra>"))
+    fig.add_trace(go.Bar(x=w2["일"], y=w2["예상공급량(GJ)"], name="평일2(화,수,목)", marker_color="#87CEFA", width=0.8, hovertemplate="%{x}일: %{y:,.0f} GJ<extra>%{name}</extra>"))
+    fig.add_trace(go.Bar(x=we["일"], y=we["예상공급량(GJ)"], name="주말/공휴일", marker_color="#D62728", width=0.8, hovertemplate="%{x}일: %{y:,.0f} GJ<extra>%{name}</extra>"))
 
     if use_calib:
         mask_changed = (abs(view["예상공급량(MJ)"] - view["보정_예상공급량(MJ)"]) > 1)
@@ -743,16 +745,17 @@ def tab_daily_plan(df_daily: pd.DataFrame):
                 y=target_view["보정_예상공급량(GJ)"],
                 marker_color="rgba(100, 100, 100, 0.6)", 
                 name="보정됨(To-Be)",
-                width=0.8
+                width=0.8,
+                hovertemplate="%{x}일: %{y:,.0f} GJ<extra>%{name}</extra>"
             ))
 
-    fig.add_trace(go.Scatter(x=view["일"], y=view["일별비율"], yaxis="y2", name="비율", line=dict(color='#FF8A80', width=2)))
-    fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False))
+    fig.add_trace(go.Scatter(x=view["일"], y=view["일별비율"], yaxis="y2", name="비율", line=dict(color='#FF8A80', width=2), hovertemplate="%{x}일: %{y:.4f}<extra>%{name}</extra>"))
+    fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Upper(GJ)"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
     fig.add_trace(go.Scatter(x=view["일"], y=view["Bound_Lower(GJ)"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(100,100,100,0.45)', name='범위(±10%)', hoverinfo='skip'))
     
     outliers = view[view["is_outlier"]]
     if not outliers.empty:
-        fig.add_trace(go.Scatter(x=outliers["일"], y=outliers["예상공급량(GJ)"], mode='markers', marker=dict(color='red', symbol='x', size=10), name='Outlier'))
+        fig.add_trace(go.Scatter(x=outliers["일"], y=outliers["예상공급량(GJ)"], mode='markers', marker=dict(color='red', symbol='x', size=10), name='Outlier', hovertemplate="%{x}일: %{y:,.0f} GJ<extra>%{name}</extra>"))
 
     fig.update_layout(
         title=f"{target_year}년 {target_month}월 공급계획",
